@@ -1,0 +1,5 @@
+node_modules
+*.log
+.DS_Store
+# Real Amazon pages never go in the repo; scrub them first (see README).
+private/
