@@ -1,0 +1,70 @@
+# Ledger for Amazon
+
+A Chrome extension that reads your Amazon orders and sends them to your own
+[Ledger](https://github.com/thorin29/ledger) server, so each Amazon card charge is split by
+item (groceries, household, gifts…) instead of sitting in one category.
+
+It needs Ledger 0.106.0 or later.
+
+## Install
+
+1. Download this repo (**Code › Download ZIP**) and unzip it.
+2. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and pick the
+   `dist` folder.
+3. Click the extension's icon and connect: your Ledger address, username and password, and a
+   code from **Settings › Sign-in & people › Add a phone**. Chrome asks to let it reach that
+   one address.
+
+To update, replace the `dist` folder with the new one and click the reload arrow on
+`chrome://extensions`.
+
+## How it works
+
+- Every 6 hours while Chrome is open, and when Chrome starts, it reads **Your Orders** using
+  the Amazon sign-in already in your browser. No Amazon tab needs to be open. **Sync Now** runs
+  it any time.
+- It starts where Ledger's last Amazon split left off, reads each order's page (and the invoice
+  when the order page doesn't list the card charges), and sends the orders to Ledger in batches.
+- Ledger matches each card charge Amazon lists to a bank charge (same amount within a cent,
+  within five days) and splits it across the items in that shipment. Charges already split are
+  left alone.
+- If Amazon signs you out, asks for a captcha, or changes its pages, the sync stops and both
+  the popup and Ledger tell you.
+
+## What it reads, keeps and sends
+
+- **Reads:** Amazon's order pages, with GET requests only. It never clicks, buys or changes
+  anything on Amazon and never reads your cookies.
+- **Keeps from each page:** order number and date, item names, prices and quantities, ship
+  dates, and each card charge's date, amount and last 4 digits. Names, addresses, gift
+  messages and everything else are dropped while the page is read.
+- **Sends:** those fields, to your Ledger address only, over HTTPS. No analytics and no other
+  servers; fonts and icons are built in.
+- **Stores in Chrome:** your Ledger address, the device token, and when it last synced. No
+  order data. Your password is used once to connect and is never stored.
+- **The token** only works for Ledger's Amazon endpoints (an `amazon`-scoped device), so it
+  can't read or change anything else. **Disconnect** signs it out; you can also remove it in
+  Ledger's **Settings › Sign-in & people**.
+
+Chrome doesn't encrypt extension storage, so use disk encryption (BitLocker or FileVault) on
+the computer and a Chrome profile only you use.
+
+## When Amazon changes its pages
+
+The popup says **Amazon changed its pages** and Ledger shows the same alert, naming the part
+that broke. **Copy Page Outline** copies that page's structure with every word masked (letters
+become x, digits 0) so the selectors in `src/amazon/selectors.ts` can be fixed without sharing
+anything personal.
+
+## Development
+
+```
+npm install
+npm run check   # typecheck, tests, privacy check, build
+```
+
+`npm run build` writes `dist/`, which is committed so the extension can be loaded straight
+from a download. Test pages in `test/fixtures` are hand-written with invented values; never
+commit a saved real page. `npm run privacy` fails on real-looking order numbers, card digits,
+emails, phone numbers and street addresses. In GitHub, an optional `PRIVATE_DENYLIST` secret
+(comma-separated SHA-256 hashes of lowercase words) blocks words you name without listing them.

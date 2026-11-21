@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=360">
+<title>Ledger for Amazon</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand">
+    <span class="logo">{{icon:shopping-cart}}</span>
+    <h1 id="title">Ledger for Amazon</h1>
+  </div>
+  <span class="version" id="version"></span>
+</header>
+
+<!-- Setup -->
+<section id="setup" hidden>
+  <form id="setup-form" class="form" autocomplete="off">
+    <label for="ledger">Ledger address</label>
+    <input id="ledger" name="ledger" type="text" inputmode="url" placeholder="https://ledger.example.com" required spellcheck="false">
+    <label for="username">Username</label>
+    <input id="username" name="username" type="text" required spellcheck="false" autocapitalize="off">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" required>
+    <label for="code">Add a phone code</label>
+    <input id="code" name="code" type="text" required spellcheck="false" autocapitalize="characters" placeholder="ABCD-EFGH">
+    <p class="hint">Settings › Sign-in &amp; people › Add a phone</p>
+    <p class="error" id="setup-error" role="alert" hidden></p>
+  </form>
+  <footer class="actions">
+    <button type="submit" form="setup-form" class="primary" id="connect">Connect</button>
+  </footer>
+</section>
+
+<!-- Connected -->
+<section id="connected" hidden>
+  <div class="body">
+    <p class="status"><span class="dot" id="dot"></span><strong id="status-word">Connected</strong><span class="muted" id="status-when"></span></p>
+
+    <div class="problem" id="problem" hidden>
+      <span class="problem-icon">{{icon:warning}}</span>
+      <div>
+        <p class="problem-title" id="problem-title"></p>
+        <p class="problem-body" id="problem-body"></p>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><span class="num" id="split">0</span><span class="label">Charges split this month</span></div>
+      <div class="stat"><span class="num" id="waiting">0</span><span class="label">Waiting on bank</span></div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <label for="auto">Sync automatically</label>
+        <button id="auto" class="switch" role="switch" aria-checked="true" aria-label="Sync automatically"><span></span></button>
+      </div>
+      <div class="row"><span>Next sync</span><span class="muted" id="next"></span></div>
+      <div class="row">
+        <span>Accent</span>
+        <span class="swatches" id="swatches"></span>
+      </div>
+    </div>
+
+    <p class="muted small" id="through"></p>
+  </div>
+  <footer class="actions">
+    <button class="primary" id="main-action">{{icon:arrows-clockwise}}<span id="main-label">Sync Now</span></button>
+    <div class="links">
+      <button class="link" id="open-ledger">Open Ledger</button>
+      <button class="link" id="disconnect">Disconnect</button>
+    </div>
+  </footer>
+</section>
+
+<script src="popup.js" type="module"></script>
+</body>
+</html>
