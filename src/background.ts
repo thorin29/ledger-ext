@@ -169,7 +169,7 @@ export function syncNow(): Promise<void> {
         ...(outcome.status ? { lastCounts: outcome.counts } : {}),
         ...(outcome.ledgerFrom ? { ledgerFrom: outcome.ledgerFrom } : {}),
         ...(outcome.status === "ok"
-          ? { waitingSince: outcome.waitingSince, ordersWaiting: outcome.counts.waiting, syncedThrough: new Date().toISOString().slice(0, 10), syncFrom: outcome.syncFrom }
+          ? { waitingSince: outcome.waitingSince, ordersWaiting: outcome.counts.waiting, syncedThrough: new Date().toLocaleDateString("en-CA"), syncFrom: outcome.syncFrom }
           : {}),
         ...(st ? { chargesSplitThisMonth: st.chargesSplitThisMonth } : outcome.chargesSplitThisMonth !== null ? { chargesSplitThisMonth: outcome.chargesSplitThisMonth } : {}),
       });
@@ -220,19 +220,24 @@ async function handle(msg: Request): Promise<unknown> {
       await schedule();
       return { ok: true };
     case "outline": {
-      // The page that failed, with every word masked, for fixing the selectors.
-      const s = await load();
-      const list = await fetchAmazon(listUrl(Number(new Date().toISOString().slice(0, 4))));
+      // Your Orders and the first order on it, every word masked, for fixing the selectors.
+      const list = await fetchAmazon(listUrl(new Date().getFullYear()));
       if ("blocked" in list) return { error: list.blocked };
-      if (s.failedSection === "orders_list") return parse("outline", list.html, list.url);
+      const parts: string[] = [];
+      const listOutline = (await parse("outline", list.html, list.url)) as { outline?: string };
+      parts.push(`== Your Orders ==\n${listOutline.outline ?? ""}`);
       const page = (await parse<ListPage>("list", list.html, list.url)) as Loaded<ListPage>;
-      const id = "ok" in page ? page.ok.orders[0]?.orderId : undefined;
-      if (!id) return parse("outline", list.html, list.url);
-      const order = await fetchAmazon(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(id)}`);
-      if ("blocked" in order) return { error: order.blocked };
-      const result = await parse("outline", order.html, order.url);
+      const id = "ok" in page ? page.ok.orders.find((o) => !o.orderId.startsWith("D"))?.orderId : undefined;
+      if (id) {
+        await pause();
+        const order = await fetchAmazon(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(id)}`);
+        if (!("blocked" in order)) {
+          const o = (await parse("outline", order.html, order.url)) as { outline?: string };
+          parts.push(`== Order page ==\n${o.outline ?? ""}`);
+        }
+      }
       await closeOffscreen();
-      return result;
+      return { outline: parts.join("\n\n") };
     }
   }
 }

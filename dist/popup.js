@@ -135,6 +135,8 @@ async function render() {
   const [runOrders, runResult] = countLines(s.lastCounts);
   $("run-orders").textContent = runOrders;
   $("run-result").textContent = runResult;
+  const c = s.lastCounts;
+  $("outline-link").hidden = !c || currentAction === "outline" || !(c.unreadable > 0 || c.listed <= 1);
   const swatches = $("swatches");
   swatches.replaceChildren(
     ...ACCENTS.map(([name, color]) => {
@@ -148,7 +150,7 @@ async function render() {
     })
   );
 }
-$("version").textContent = `v${"0.2.0"}`;
+$("version").textContent = `v${"0.2.1"}`;
 $("setup-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const err = $("setup-error");
@@ -183,22 +185,28 @@ $("main-action").addEventListener("click", async () => {
       await save({ token: void 0, localProblem: null });
       await chrome.storage.local.remove("token");
       return;
-    case "outline": {
-      $("main-label").textContent = "Reading the page\u2026";
-      const r = await send({ type: "outline" });
-      if (r.outline) {
-        await navigator.clipboard.writeText(r.outline);
-        $("main-label").textContent = "Copied";
-      } else {
-        $("main-label").textContent = "Couldn't read it";
-      }
-      setTimeout(() => void render(), 2e3);
+    case "outline":
+      await copyOutline($("main-label"), ACTION_LABEL.outline);
       return;
-    }
     default:
       await send({ type: "sync" });
   }
 });
+async function copyOutline(label, restore) {
+  label.textContent = "Reading the page\u2026";
+  const r = await send({ type: "outline" });
+  if (r.outline) {
+    await navigator.clipboard.writeText(r.outline);
+    label.textContent = "Copied";
+  } else {
+    label.textContent = "Couldn't read it";
+  }
+  setTimeout(() => {
+    label.textContent = restore;
+    void render();
+  }, 2e3);
+}
+$("outline-link").addEventListener("click", () => void copyOutline($("outline-link"), "Copy Page Outline"));
 $("auto").addEventListener("click", async () => {
   const on = $("auto").getAttribute("aria-checked") !== "true";
   await send({ type: "auto", on });

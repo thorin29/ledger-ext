@@ -209,13 +209,10 @@ async function runSync(deps, opts = {}) {
       if ("blocked" in page) return stopFor(page.blocked);
       if ("failed" in page) return finish("parse_failed", page.failed);
       if ("skip" in page) break;
-      let older = false;
       let fresh = 0;
+      const dated = page.ok.orders.filter((o) => o.orderDate);
       for (const o of page.ok.orders) {
-        if (o.orderDate && o.orderDate < listFrom) {
-          older = true;
-          continue;
-        }
+        if (o.orderDate && o.orderDate < listFrom) continue;
         if (seen.has(o.orderId)) continue;
         seen.add(o.orderId);
         fresh++;
@@ -223,7 +220,7 @@ async function runSync(deps, opts = {}) {
         if (o.orderId.startsWith("D")) counts.digital++;
         else ids.push(o.orderId);
       }
-      if (older) break years;
+      if (dated.length && dated.every((o) => o.orderDate < listFrom)) break years;
       if (!fresh) break;
       url = page.ok.nextUrl;
     }
@@ -253,7 +250,7 @@ async function runSync(deps, opts = {}) {
     orders.push(got.ok);
   }
   counts.read = orders.length;
-  if (counts.unreadable >= 3 && counts.unreadable * 2 >= tried) {
+  if (counts.unreadable >= 3 && counts.unreadable * 2 >= tried || counts.unreadable > 0 && counts.read === 0) {
     const worst = [...failures.entries()].sort((a, b) => b[1] - a[1])[0][0];
     return finish("parse_failed", worst);
   }
@@ -291,7 +288,7 @@ async function runSync(deps, opts = {}) {
 }
 
 // src/background.ts
-var VERSION = "0.2.0";
+var VERSION = "0.2.1";
 var AMAZON = "https://www.amazon.com";
 var ALARM = "sync";
 var EVERY_MINUTES = 6 * 60;
@@ -421,7 +418,7 @@ function syncNow() {
         localProblem: outcome.localProblem,
         ...outcome.status ? { lastCounts: outcome.counts } : {},
         ...outcome.ledgerFrom ? { ledgerFrom: outcome.ledgerFrom } : {},
-        ...outcome.status === "ok" ? { waitingSince: outcome.waitingSince, ordersWaiting: outcome.counts.waiting, syncedThrough: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10), syncFrom: outcome.syncFrom } : {},
+        ...outcome.status === "ok" ? { waitingSince: outcome.waitingSince, ordersWaiting: outcome.counts.waiting, syncedThrough: (/* @__PURE__ */ new Date()).toLocaleDateString("en-CA"), syncFrom: outcome.syncFrom } : {},
         ...st ? { chargesSplitThisMonth: st.chargesSplitThisMonth } : outcome.chargesSplitThisMonth !== null ? { chargesSplitThisMonth: outcome.chargesSplitThisMonth } : {}
       });
     } catch {
@@ -461,18 +458,25 @@ async function handle(msg) {
       await schedule();
       return { ok: true };
     case "outline": {
-      const s = await load();
-      const list = await fetchAmazon(listUrl(Number((/* @__PURE__ */ new Date()).toISOString().slice(0, 4))));
+      const list = await fetchAmazon(listUrl((/* @__PURE__ */ new Date()).getFullYear()));
       if ("blocked" in list) return { error: list.blocked };
-      if (s.failedSection === "orders_list") return parse("outline", list.html, list.url);
+      const parts = [];
+      const listOutline = await parse("outline", list.html, list.url);
+      parts.push(`== Your Orders ==
+${listOutline.outline ?? ""}`);
       const page = await parse("list", list.html, list.url);
-      const id = "ok" in page ? page.ok.orders[0]?.orderId : void 0;
-      if (!id) return parse("outline", list.html, list.url);
-      const order = await fetchAmazon(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(id)}`);
-      if ("blocked" in order) return { error: order.blocked };
-      const result = await parse("outline", order.html, order.url);
+      const id = "ok" in page ? page.ok.orders.find((o) => !o.orderId.startsWith("D"))?.orderId : void 0;
+      if (id) {
+        await pause();
+        const order = await fetchAmazon(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(id)}`);
+        if (!("blocked" in order)) {
+          const o = await parse("outline", order.html, order.url);
+          parts.push(`== Order page ==
+${o.outline ?? ""}`);
+        }
+      }
       await closeOffscreen();
-      return result;
+      return { outline: parts.join("\n\n") };
     }
   }
 }

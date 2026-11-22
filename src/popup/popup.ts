@@ -96,6 +96,9 @@ async function render() {
   const [runOrders, runResult] = countLines(s.lastCounts);
   $("run-orders").textContent = runOrders;
   $("run-result").textContent = runResult;
+  // A sync that read little or nothing: offer the masked outline even without a problem shown.
+  const c = s.lastCounts;
+  $("outline-link").hidden = !c || currentAction === "outline" || !(c.unreadable > 0 || c.listed <= 1);
 
   const swatches = $("swatches");
   swatches.replaceChildren(
@@ -150,22 +153,30 @@ $("main-action").addEventListener("click", async () => {
       await save({ token: undefined, localProblem: null });
       await chrome.storage.local.remove("token");
       return;
-    case "outline": {
-      $("main-label").textContent = "Reading the page…";
-      const r = await send({ type: "outline" });
-      if (r.outline) {
-        await navigator.clipboard.writeText(r.outline);
-        $("main-label").textContent = "Copied";
-      } else {
-        $("main-label").textContent = "Couldn't read it";
-      }
-      setTimeout(() => void render(), 2000);
+    case "outline":
+      await copyOutline($("main-label"), ACTION_LABEL.outline);
       return;
-    }
     default:
       await send({ type: "sync" });
   }
 });
+
+async function copyOutline(label: HTMLElement, restore: string) {
+  label.textContent = "Reading the page…";
+  const r = await send({ type: "outline" });
+  if (r.outline) {
+    await navigator.clipboard.writeText(r.outline);
+    label.textContent = "Copied";
+  } else {
+    label.textContent = "Couldn't read it";
+  }
+  setTimeout(() => {
+    label.textContent = restore;
+    void render();
+  }, 2000);
+}
+
+$("outline-link").addEventListener("click", () => void copyOutline($("outline-link"), "Copy Page Outline"));
 
 $("auto").addEventListener("click", async () => {
   const on = $("auto").getAttribute("aria-checked") !== "true";

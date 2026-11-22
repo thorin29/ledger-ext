@@ -322,7 +322,8 @@ function outline(doc) {
   const mask = (text) => text.replace(/[A-Za-z0-9'’]+/g, (w) => keep.has(w.toLowerCase()) ? w : w.replace(/[A-Za-z]/g, "x").replace(/\d/g, "0"));
   const lines = [];
   const walk = (el, depth) => {
-    if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|SVG|IFRAME|LINK|META)$/i.test(el.tagName) || depth > 40) return;
+    if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|SVG|IFRAME|LINK|META|HEADER|FOOTER)$/i.test(el.tagName) || depth > 40 || lines.length >= 1500) return;
+    if (/^(nav|rhf|skiplink|navFooter|navbar|hmenu)/i.test(el.id)) return;
     const attrs = ["id", "class", "data-component", "role", "aria-label"].map((a) => {
       const v = el.getAttribute(a);
       if (!v) return "";

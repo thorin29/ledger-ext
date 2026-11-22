@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.1]
+
+### Fixed
+- One order with an odd date on Your Orders no longer ends the sync early; it stops only when a
+  whole page is before the start day.
+- A sync that couldn't read any order page now shows "Amazon changed its pages" instead of
+  looking fine.
+- **Copy Page Outline** now shows whenever the last sync read little or nothing, and outlines
+  both Your Orders and one order page (Amazon's header, menus and footer left out).
+- "Synced through" uses your own date, not UTC.
+
 ## [0.2.0]
 
 Needs Ledger 0.108.0 for per-item splits by category.

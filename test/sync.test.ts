@@ -90,6 +90,23 @@ describe("runSync", () => {
     expect(first.loaded).toContain("111-0000000-0000001");
   });
 
+  it("doesn't stop at one odd date on a page", async () => {
+    const { d, loaded } = deps({
+      loadList: async (url) =>
+        url === "list-2026"
+          ? { ok: { orders: [{ orderId: "111-0000000-0000003", orderDate: "2026-03-12" }, { orderId: "111-0000000-0000004", orderDate: "2019-01-01" }, { orderId: "111-0000000-0000002", orderDate: "2026-03-01" }], nextUrl: null } }
+          : { ok: { orders: [], nextUrl: null } },
+    });
+    await runSync(d);
+    expect(loaded).toEqual(["111-0000000-0000002", "111-0000000-0000003"]);
+  });
+
+  it("calls it broken when no order page could be read", async () => {
+    const { d, reports } = deps({ loadList: async () => ({ ok: { orders: [{ orderId: "111-0000000-0000005", orderDate: "2026-03-05" }], nextUrl: null } }), loadOrder: async () => ({ failed: "order_items" }) });
+    expect((await runSync(d)).status).toBe("parse_failed");
+    expect(reports[0]).toEqual(["parse_failed", "order_items", 0]);
+  });
+
   it("stops when a pager repeats the same page", async () => {
     const { d, loaded } = deps({ loadList: async () => ({ ok: { orders: [{ orderId: "111-0000000-0000005", orderDate: "2026-03-05" }], nextUrl: "same" } }) });
     await runSync(d);

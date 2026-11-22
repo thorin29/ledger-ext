@@ -50,7 +50,8 @@ input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); ou
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); }
 .muted { color: var(--muted); }
 .small { margin: 0; font-size: 13px; }
-.last-run { display: flex; flex-direction: column; gap: 2px; }
+.last-run { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; }
+.small-link { margin-top: 4px; }
 
 .problem { display: flex; gap: 12px; padding: 16px; border-radius: 12px; background: var(--warn-bg); border: 1px solid var(--warn-line); }
 .problem-icon { color: var(--warn-icon); }

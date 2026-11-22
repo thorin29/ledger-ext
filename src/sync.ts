@@ -113,13 +113,10 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
       if ("blocked" in page) return stopFor(page.blocked);
       if ("failed" in page) return finish("parse_failed", page.failed);
       if ("skip" in page) break;
-      let older = false;
       let fresh = 0;
+      const dated = page.ok.orders.filter((o) => o.orderDate);
       for (const o of page.ok.orders) {
-        if (o.orderDate && o.orderDate < listFrom) {
-          older = true;
-          continue;
-        }
+        if (o.orderDate && o.orderDate < listFrom) continue;
         if (seen.has(o.orderId)) continue;
         seen.add(o.orderId);
         fresh++;
@@ -128,8 +125,9 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
         if (o.orderId.startsWith("D")) counts.digital++;
         else ids.push(o.orderId);
       }
-      // Past the start, or the same page again (a pager Amazon ignored): this year is done.
-      if (older) break years;
+      // Every dated order on the page is before the start: done. One odd date doesn't stop it.
+      if (dated.length && dated.every((o) => o.orderDate! < listFrom)) break years;
+      // The same page again (a pager Amazon ignored): this year is done.
       if (!fresh) break;
       url = page.ok.nextUrl;
     }
@@ -162,7 +160,7 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
   }
   counts.read = orders.length;
   // A page here and there can be odd; most failing means Amazon changed its pages.
-  if (counts.unreadable >= 3 && counts.unreadable * 2 >= tried) {
+  if ((counts.unreadable >= 3 && counts.unreadable * 2 >= tried) || (counts.unreadable > 0 && counts.read === 0)) {
     const worst = [...failures.entries()].sort((a, b) => b[1] - a[1])[0]![0];
     return finish("parse_failed", worst);
   }
