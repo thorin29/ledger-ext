@@ -39,13 +39,27 @@ var KEYS = [
   "chargesSplitThisMonth",
   "syncedThrough",
   "syncFrom",
-  "running"
+  "running",
+  "runStartedAt",
+  "lastCounts",
+  "ledgerFrom"
 ];
 async function load() {
   return await chrome.storage.local.get(KEYS);
 }
 async function save(patch) {
   await chrome.storage.local.set(patch);
+}
+
+// src/counts.ts
+function countLines(c) {
+  if (!c) return ["", ""];
+  const parts = (pairs) => pairs.filter(([, n]) => n > 0).map(([label, n]) => `${label} ${n}`);
+  const skipped = parts([["digital", c.digital], ["cancelled", c.cancelled], ["unreadable", c.unreadable]]);
+  const skipTotal = c.digital + c.cancelled + c.unreadable;
+  const first = [`Orders ${c.listed}`, `Sent ${c.sent}`, ...parts([["Done before", c.finished]]), ...skipTotal ? [`Skipped ${skipTotal} (${skipped.join(", ")})`] : []];
+  const second = [`Split ${c.split}`, ...parts([["Waiting", c.waiting], ["No match", c.noMatch], ["No charge list", c.noChargeList]]), ...c.items ? [`Categories ${c.categorized}/${c.items}`] : []];
+  return [first.join(" \xB7 "), second.join(" \xB7 ")];
 }
 
 // src/popup/popup.ts
@@ -72,6 +86,11 @@ function when(iso) {
   const today = (/* @__PURE__ */ new Date()).toDateString() === d.toDateString();
   return today ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
+function nextLabel(ms) {
+  const d = new Date(ms);
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return d.toDateString() === (/* @__PURE__ */ new Date()).toDateString() ? `About ${time}` : `Tomorrow about ${time}`;
+}
 var dayLabel = (iso) => iso ? (/* @__PURE__ */ new Date(`${iso}T12:00:00`)).toLocaleDateString([], { month: "short", day: "numeric" }) : "";
 function send(msg) {
   return chrome.runtime.sendMessage(msg);
@@ -95,23 +114,27 @@ async function render() {
   const problem = problemKey ? PROBLEMS[problemKey] : null;
   $("problem").hidden = !problem;
   $("dot").style.background = problem ? "var(--amber)" : "var(--good)";
-  $("status-word").textContent = s.running ? "Syncing" : problem ? "Sync paused" : "Connected";
-  $("status-when").textContent = s.lastRunAt && !s.running ? `\xB7 last sync ${when(s.lastRunAt)}` : "";
+  const running = !!s.running && !!s.runStartedAt && Date.now() - Date.parse(s.runStartedAt) < 30 * 6e4;
+  $("status-word").textContent = running ? "Syncing" : problem ? "Sync paused" : "Connected";
+  $("status-when").textContent = s.lastRunAt && !running ? `\xB7 last sync ${when(s.lastRunAt)}` : "";
   if (problem) {
     $("problem-title").textContent = problem.title;
     $("problem-body").textContent = problemKey === "parse_failed" && s.failedSection ? `${problem.body} \xB7 ${s.failedSection.replace(/_/g, " ")}` : problem.body;
   }
   currentAction = problem?.action ?? "sync";
   $("main-action").classList.toggle("no-icon", currentAction !== "sync");
-  $("main-label").textContent = s.running && currentAction === "sync" ? "Syncing\u2026" : ACTION_LABEL[currentAction];
-  $("main-action").disabled = !!s.running && currentAction === "sync";
+  $("main-label").textContent = running && currentAction === "sync" ? "Syncing\u2026" : ACTION_LABEL[currentAction];
+  $("main-action").disabled = running && currentAction === "sync";
   $("split").textContent = String(s.chargesSplitThisMonth ?? 0);
   $("waiting").textContent = String(s.ordersWaiting ?? 0);
   const auto = s.autoSync !== false;
   $("auto").setAttribute("aria-checked", String(auto));
   const alarm = auto ? await chrome.alarms.get("sync") : void 0;
-  $("next").textContent = !auto ? "Off" : alarm ? `About ${when(new Date(alarm.scheduledTime).toISOString())}` : "Soon";
+  $("next").textContent = !auto ? "Off" : alarm ? nextLabel(alarm.scheduledTime) : "Soon";
   $("through").textContent = s.syncedThrough ? `Synced through ${dayLabel(s.syncedThrough)}${s.syncFrom ? ` \xB7 started from ${dayLabel(s.syncFrom)}` : ""}` : "";
+  const [runOrders, runResult] = countLines(s.lastCounts);
+  $("run-orders").textContent = runOrders;
+  $("run-result").textContent = runResult;
   const swatches = $("swatches");
   swatches.replaceChildren(
     ...ACCENTS.map(([name, color]) => {
@@ -125,7 +148,7 @@ async function render() {
     })
   );
 }
-$("version").textContent = `v${"0.1.0"}`;
+$("version").textContent = `v${"0.2.0"}`;
 $("setup-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const err = $("setup-error");

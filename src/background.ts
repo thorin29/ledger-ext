@@ -5,7 +5,7 @@
  */
 
 import * as api from "./ledger/api";
-import { forget, load, save } from "./storage";
+import { cachedCategory, clearFinished, forget, isFinished, load, markFinished, save, saveCategory } from "./storage";
 import { runSync, type Loaded } from "./sync";
 import type { ListPage, Section, SyncOrder, SyncStatus } from "./types";
 
@@ -30,8 +30,13 @@ async function schedule(): Promise<void> {
   if (!existing) await chrome.alarms.create(ALARM, { delayInMinutes: 1, periodInMinutes: EVERY_MINUTES });
 }
 
-chrome.runtime.onInstalled.addListener(() => void schedule());
+// A sync can't still be running when the extension (re)starts.
+chrome.runtime.onInstalled.addListener(async () => {
+  await save({ running: false });
+  await schedule();
+});
 chrome.runtime.onStartup.addListener(async () => {
+  await save({ running: false });
   await schedule();
   const s = await load();
   // Chrome was closed past a sync: catch up a minute after it opens.
@@ -58,16 +63,16 @@ async function closeOffscreen(): Promise<void> {
 
 type Parsed<T> = Loaded<T> | { outline: string };
 
-async function parse<T>(kind: "list" | "order" | "charges" | "outline", html: string, url: string, orderId?: string): Promise<Parsed<T>> {
+async function parse<T>(kind: "list" | "order" | "charges" | "category" | "outline", html: string, url: string, orderId?: string): Promise<Parsed<T>> {
   await ensureOffscreen();
   return chrome.runtime.sendMessage({ target: "offscreen", kind, html, url, orderId });
 }
 
-async function fetchAmazon(url: string): Promise<{ html: string; url: string } | { blocked: "captcha" | "signin" }> {
+async function fetchAmazon(url: string): Promise<{ html: string; url: string; status: number } | { blocked: "captcha" | "signin" }> {
   const res = await fetch(url, { credentials: "include", redirect: "follow", cache: "no-store" });
   // Amazon answers a robot check with 503.
   if (res.status === 503) return { blocked: "captcha" };
-  return { html: await res.text(), url: res.url || url };
+  return { html: await res.text(), url: res.url || url, status: res.status };
 }
 
 const pause = () => new Promise<void>((r) => setTimeout(r, 1500 + Math.random() * 1500));
@@ -93,6 +98,24 @@ async function loadOrder(orderId: string): Promise<Loaded<SyncOrder>> {
 
 const listUrl = (year: number) => `${AMAZON}/your-orders/orders?timeFilter=year-${year}`;
 
+/** A product's category: from the cache, else its product page (one GET), then cached. */
+async function category(productId: string): Promise<{ ok: string | null } | { blocked: "captcha" | "signin" }> {
+  if (!/^[A-Z0-9]{10}$/.test(productId)) return { ok: null };
+  const cached = await cachedCategory(productId);
+  if (cached.hit) return { ok: cached.category };
+  await pause();
+  const page = await fetchAmazon(`${AMAZON}/dp/${productId}`);
+  if ("blocked" in page) return page;
+  let found: string | null = null;
+  if (page.status === 200) {
+    const got = (await parse<string | null>("category", page.html, page.url)) as Loaded<string | null>;
+    if ("blocked" in got) return got;
+    found = "ok" in got ? got.ok : null;
+  }
+  await saveCategory(productId, found);
+  return { ok: found };
+}
+
 // ---------- Sync ----------
 
 let running: Promise<void> | null = null;
@@ -113,8 +136,8 @@ export function syncNow(): Promise<void> {
   running = (async () => {
     const s = await load();
     if (!s.ledger || !s.token) return;
-    if (s.running && s.lastRunAt && Date.now() - Date.parse(s.lastRunAt) < STALE_RUN_MS) return;
-    await save({ running: true });
+    if (s.running && s.runStartedAt && Date.now() - Date.parse(s.runStartedAt) < STALE_RUN_MS) return;
+    await save({ running: true, runStartedAt: new Date().toISOString() });
     try {
       const ledger = s.ledger;
       const token = await freshToken(ledger, s.token, s.tokenExpiresAt);
@@ -123,6 +146,10 @@ export function syncNow(): Promise<void> {
           listUrl,
           loadList,
           loadOrder,
+          category,
+          isFinished,
+          markFinished: (ids) => markFinished(ids),
+          clearFinished,
           status: () => api.status(ledger, token),
           sendOrders: (orders) => api.sendOrders(ledger, token, orders, crypto.randomUUID()),
           reportRun: async (status: SyncStatus, section: Section | null, waiting: number) => {
@@ -131,7 +158,7 @@ export function syncNow(): Promise<void> {
           pause,
           today: () => new Date().toISOString().slice(0, 10),
         },
-        { waitingSince: s.waitingSince ?? null },
+        { waitingSince: s.waitingSince ?? null, previousLedgerFrom: s.ledgerFrom ?? null },
       );
       const st = outcome.status === "ok" ? await api.status(ledger, token).catch(() => null) : null;
       await save({
@@ -139,8 +166,10 @@ export function syncNow(): Promise<void> {
         lastStatus: outcome.status ?? s.lastStatus,
         failedSection: outcome.failedSection,
         localProblem: outcome.localProblem,
+        ...(outcome.status ? { lastCounts: outcome.counts } : {}),
+        ...(outcome.ledgerFrom ? { ledgerFrom: outcome.ledgerFrom } : {}),
         ...(outcome.status === "ok"
-          ? { waitingSince: outcome.waitingSince, ordersWaiting: outcome.waiting, syncedThrough: new Date().toISOString().slice(0, 10), syncFrom: outcome.syncFrom }
+          ? { waitingSince: outcome.waitingSince, ordersWaiting: outcome.counts.waiting, syncedThrough: new Date().toISOString().slice(0, 10), syncFrom: outcome.syncFrom }
           : {}),
         ...(st ? { chargesSplitThisMonth: st.chargesSplitThisMonth } : outcome.chargesSplitThisMonth !== null ? { chargesSplitThisMonth: outcome.chargesSplitThisMonth } : {}),
       });

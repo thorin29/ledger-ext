@@ -4,7 +4,7 @@ A Chrome extension that reads your Amazon orders and sends them to your own
 [Ledger](https://github.com/thorin29/ledger) server, so each Amazon card charge is split by
 item (groceries, household, gifts…) instead of sitting in one category.
 
-It needs Ledger 0.106.0 or later.
+It needs Ledger 0.108.0 or later.
 
 ## Install
 
@@ -23,11 +23,13 @@ To update, replace the `dist` folder with the new one and click the reload arrow
 - Every 6 hours while Chrome is open, and when Chrome starts, it reads **Your Orders** using
   the Amazon sign-in already in your browser. No Amazon tab needs to be open. **Sync Now** runs
   it any time.
-- It starts where Ledger's last Amazon split left off, reads each order's page (and the invoice
-  when the order page doesn't list the card charges), and sends the orders to Ledger in batches.
+- It starts where Ledger's last Amazon split left off (reading orders placed up to 30 days
+  earlier, since Amazon charges when an order ships), reads each order's page (and the invoice
+  when the order page doesn't list the card charges), reads each new product's page once for its
+  category, and sends the orders to Ledger in batches. Orders already fully split are skipped.
 - Ledger matches each card charge Amazon lists to a bank charge (same amount within a cent,
-  within five days) and splits it across the items in that shipment. Charges already split are
-  left alone.
+  within five days) and splits it into one part per item, placed by Amazon's category. Charges
+  already split are left alone.
 - If Amazon signs you out, asks for a captcha, or changes its pages, the sync stops and both
   the popup and Ledger tell you.
 
@@ -35,13 +37,15 @@ To update, replace the `dist` folder with the new one and click the reload arrow
 
 - **Reads:** Amazon's order pages, with GET requests only. It never clicks, buys or changes
   anything on Amazon and never reads your cookies.
-- **Keeps from each page:** order number and date, item names, prices and quantities, ship
-  dates, and each card charge's date, amount and last 4 digits. Names, addresses, gift
+- **Keeps from each page:** order number and date, item names, product ids, prices and
+  quantities, ship dates, each card charge's date, amount and last 4 digits, and each product's
+  category. Names, addresses, gift
   messages and everything else are dropped while the page is read.
 - **Sends:** those fields, to your Ledger address only, over HTTPS. No analytics and no other
   servers; fonts and icons are built in.
-- **Stores in Chrome:** your Ledger address, the device token, and when it last synced. No
-  order data. Your password is used once to connect and is never stored.
+- **Stores in Chrome:** your Ledger address, the device token, the last sync's counts, a cache
+  of product categories, and salted hashes of fully split orders so they aren't read again. No
+  order numbers, items or amounts. Your password is used once to connect and is never stored.
 - **The token** only works for Ledger's Amazon endpoints (an `amazon`-scoped device), so it
   can't read or change anything else. **Disconnect** signs it out; you can also remove it in
   Ledger's **Settings › Sign-in & people**.

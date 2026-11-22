@@ -82,7 +82,10 @@ var KEYS = [
   "chargesSplitThisMonth",
   "syncedThrough",
   "syncFrom",
-  "running"
+  "running",
+  "runStartedAt",
+  "lastCounts",
+  "ledgerFrom"
 ];
 async function load() {
   return await chrome.storage.local.get(KEYS);
@@ -91,16 +94,84 @@ async function save(patch) {
   await chrome.storage.local.set(patch);
 }
 async function forget() {
-  await chrome.storage.local.remove(KEYS.filter((k) => k !== "ledger" && k !== "accent" && k !== "autoSync"));
+  await chrome.storage.local.remove([...KEYS.filter((k) => k !== "ledger" && k !== "accent" && k !== "autoSync"), FINISHED, SALT]);
+}
+var CATEGORIES = "categories";
+var DAY = 864e5;
+var CATEGORY_MAX = 2e3;
+var CATEGORY_DAYS = 180;
+var NONE_DAYS = 30;
+async function cachedCategory(productId, now = Date.now()) {
+  const cache = (await chrome.storage.local.get(CATEGORIES))[CATEGORIES] ?? {};
+  const e = cache[productId];
+  if (!e) return { hit: false, category: null };
+  const days = now / DAY - e.t;
+  return days <= (e.c ? CATEGORY_DAYS : NONE_DAYS) ? { hit: true, category: e.c } : { hit: false, category: null };
+}
+async function saveCategory(productId, category2, now = Date.now()) {
+  const cache = (await chrome.storage.local.get(CATEGORIES))[CATEGORIES] ?? {};
+  cache[productId] = { c: category2, t: Math.floor(now / DAY) };
+  const today = now / DAY;
+  let entries = Object.entries(cache).filter(([, e]) => today - e.t <= CATEGORY_DAYS);
+  if (entries.length > CATEGORY_MAX) entries = entries.sort((a, b) => b[1].t - a[1].t).slice(0, CATEGORY_MAX);
+  await chrome.storage.local.set({ [CATEGORIES]: Object.fromEntries(entries) });
+}
+var FINISHED = "finished";
+var SALT = "salt";
+var FINISHED_MAX = 1500;
+var FINISHED_DAYS = 180;
+async function salt() {
+  const got = (await chrome.storage.local.get(SALT))[SALT];
+  if (got) return got;
+  const fresh = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  await chrome.storage.local.set({ [SALT]: fresh });
+  return fresh;
+}
+async function hash(orderId) {
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${await salt()}:${orderId}`));
+  return [...new Uint8Array(bytes)].slice(0, 12).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function isFinished(orderId) {
+  const set = (await chrome.storage.local.get(FINISHED))[FINISHED] ?? {};
+  return await hash(orderId) in set;
+}
+async function markFinished(orderIds, now = Date.now()) {
+  const set = (await chrome.storage.local.get(FINISHED))[FINISHED] ?? {};
+  const today = Math.floor(now / DAY);
+  for (const id of orderIds) set[await hash(id)] = today;
+  let entries = Object.entries(set).filter(([, t]) => today - t <= FINISHED_DAYS);
+  if (entries.length > FINISHED_MAX) entries = entries.sort((a, b) => b[1] - a[1]).slice(0, FINISHED_MAX);
+  await chrome.storage.local.set({ [FINISHED]: Object.fromEntries(entries) });
+}
+async function clearFinished() {
+  await chrome.storage.local.remove(FINISHED);
 }
 
 // src/sync.ts
+var ORDER_LOOKBACK_DAYS = 30;
 var localFrom = (e) => e instanceof LedgerError && e.kind === "signed_out" ? "reconnect" : "ledger_unreachable";
+var minusDays = (day, n) => new Date(Date.parse(`${day}T00:00:00Z`) - n * 864e5).toISOString().slice(0, 10);
+var emptyCounts = () => ({
+  listed: 0,
+  finished: 0,
+  read: 0,
+  sent: 0,
+  digital: 0,
+  cancelled: 0,
+  unreadable: 0,
+  split: 0,
+  waiting: 0,
+  noMatch: 0,
+  noChargeList: 0,
+  items: 0,
+  categorized: 0
+});
 async function runSync(deps, opts = {}) {
   const maxOrders = opts.maxOrders ?? 150;
   const maxListPages = opts.maxListPages ?? 40;
   const batchSize = opts.batchSize ?? 20;
-  const out = { status: null, failedSection: null, localProblem: null, ordersRead: 0, split: 0, waiting: 0, waitingSince: null, syncFrom: null, chargesSplitThisMonth: null };
+  const counts = emptyCounts();
+  const out = { status: null, failedSection: null, localProblem: null, counts, waitingSince: null, syncFrom: null, ledgerFrom: null, chargesSplitThisMonth: null };
   let st;
   try {
     st = await deps.status();
@@ -109,73 +180,107 @@ async function runSync(deps, opts = {}) {
     return out;
   }
   out.chargesSplitThisMonth = st.chargesSplitThisMonth;
+  out.ledgerFrom = st.syncFrom;
+  if (opts.previousLedgerFrom && st.syncFrom < opts.previousLedgerFrom) await deps.clearFinished();
   const from = [st.syncFrom, opts.waitingSince].filter((d) => !!d).sort()[0];
   out.syncFrom = from;
+  const listFrom = minusDays(from, ORDER_LOOKBACK_DAYS);
   const finish = async (status2, section) => {
     out.status = status2;
     out.failedSection = section;
     try {
-      await deps.reportRun(status2, section, out.waiting);
+      await deps.reportRun(status2, section, counts.waiting);
     } catch (e) {
       out.localProblem = localFrom(e);
     }
     return out;
   };
+  const stopFor = (b) => finish(b === "signin" ? "amazon_signed_out" : "captcha", null);
   const ids = [];
   const seen = /* @__PURE__ */ new Set();
   let pages = 0;
   const thisYear = Number(deps.today().slice(0, 4));
-  years: for (let year = thisYear; year >= Number(from.slice(0, 4)); year--) {
+  years: for (let year = thisYear; year >= Number(listFrom.slice(0, 4)); year--) {
     let url = deps.listUrl(year);
     while (url) {
       if (pages++ >= maxListPages) break years;
       if (pages > 1) await deps.pause();
       const page = await deps.loadList(url);
-      if ("blocked" in page) return finish(page.blocked === "signin" ? "amazon_signed_out" : "captcha", null);
+      if ("blocked" in page) return stopFor(page.blocked);
       if ("failed" in page) return finish("parse_failed", page.failed);
       if ("skip" in page) break;
       let older = false;
+      let fresh = 0;
       for (const o of page.ok.orders) {
-        if (o.orderDate && o.orderDate < from) {
+        if (o.orderDate && o.orderDate < listFrom) {
           older = true;
           continue;
         }
-        if (!seen.has(o.orderId) && !o.orderId.startsWith("D")) {
-          seen.add(o.orderId);
-          ids.push(o.orderId);
-        }
+        if (seen.has(o.orderId)) continue;
+        seen.add(o.orderId);
+        fresh++;
+        counts.listed++;
+        if (o.orderId.startsWith("D")) counts.digital++;
+        else ids.push(o.orderId);
       }
       if (older) break years;
+      if (!fresh) break;
       url = page.ok.nextUrl;
     }
+  }
+  const todo = [];
+  for (const id of ids.reverse()) {
+    if (await deps.isFinished(id)) counts.finished++;
+    else todo.push(id);
   }
   const orders = [];
   const failures = /* @__PURE__ */ new Map();
   let tried = 0;
-  for (const id of ids.reverse().slice(0, maxOrders)) {
+  for (const id of todo.slice(0, maxOrders)) {
     await deps.pause();
     tried++;
     const got = await deps.loadOrder(id);
-    if ("blocked" in got) return finish(got.blocked === "signin" ? "amazon_signed_out" : "captcha", null);
+    if ("blocked" in got) return stopFor(got.blocked);
     if ("failed" in got) {
+      counts.unreadable++;
       failures.set(got.failed, (failures.get(got.failed) ?? 0) + 1);
       continue;
     }
-    if ("skip" in got) continue;
-    if (got.ok.orderDate >= from) orders.push(got.ok);
+    if ("skip" in got) {
+      counts.cancelled++;
+      continue;
+    }
+    orders.push(got.ok);
   }
-  out.ordersRead = orders.length;
-  const failed = [...failures.values()].reduce((s, n) => s + n, 0);
-  if (failed >= 3 && failed * 2 >= tried) {
+  counts.read = orders.length;
+  if (counts.unreadable >= 3 && counts.unreadable * 2 >= tried) {
     const worst = [...failures.entries()].sort((a, b) => b[1] - a[1])[0][0];
     return finish("parse_failed", worst);
   }
+  const asked = /* @__PURE__ */ new Map();
+  for (const it of orders.flatMap((o) => o.items)) {
+    counts.items++;
+    if (!it.productId) continue;
+    if (!asked.has(it.productId)) {
+      const c = await deps.category(it.productId);
+      if ("blocked" in c) return stopFor(c.blocked);
+      asked.set(it.productId, c.ok);
+    }
+    it.category = asked.get(it.productId) ?? null;
+    if (it.category) counts.categorized++;
+  }
   for (let i = 0; i < orders.length; i += batchSize) {
+    const batch = orders.slice(i, i + batchSize);
     try {
-      const r = await deps.sendOrders(orders.slice(i, i + batchSize));
-      out.split += r.split;
-      out.waiting += r.waiting;
+      const r = await deps.sendOrders(batch);
+      counts.sent += batch.length;
+      counts.split += r.split;
+      counts.waiting += r.waiting;
+      counts.noMatch += r.noMatch ?? 0;
+      counts.noChargeList += r.noChargeList ?? 0;
       if (r.waitingSince && (!out.waitingSince || r.waitingSince < out.waitingSince)) out.waitingSince = r.waitingSince;
+      const done = (r.done ?? []).map((n) => batch[n]?.orderId).filter((id) => !!id);
+      if (done.length) await deps.markFinished(done);
     } catch (e) {
       if (e instanceof LedgerError && (e.kind === "server" || e.kind === "refused")) return finish("ledger_error", null);
       out.localProblem = localFrom(e);
@@ -186,7 +291,7 @@ async function runSync(deps, opts = {}) {
 }
 
 // src/background.ts
-var VERSION = "0.1.0";
+var VERSION = "0.2.0";
 var AMAZON = "https://www.amazon.com";
 var ALARM = "sync";
 var EVERY_MINUTES = 6 * 60;
@@ -201,8 +306,12 @@ async function schedule() {
   const existing = await chrome.alarms.get(ALARM);
   if (!existing) await chrome.alarms.create(ALARM, { delayInMinutes: 1, periodInMinutes: EVERY_MINUTES });
 }
-chrome.runtime.onInstalled.addListener(() => void schedule());
+chrome.runtime.onInstalled.addListener(async () => {
+  await save({ running: false });
+  await schedule();
+});
 chrome.runtime.onStartup.addListener(async () => {
+  await save({ running: false });
   await schedule();
   const s = await load();
   if (s.token && s.autoSync !== false && (!s.lastRunAt || Date.now() - Date.parse(s.lastRunAt) > EVERY_MINUTES * 6e4)) {
@@ -228,7 +337,7 @@ async function parse(kind, html, url, orderId) {
 async function fetchAmazon(url) {
   const res = await fetch(url, { credentials: "include", redirect: "follow", cache: "no-store" });
   if (res.status === 503) return { blocked: "captcha" };
-  return { html: await res.text(), url: res.url || url };
+  return { html: await res.text(), url: res.url || url, status: res.status };
 }
 var pause = () => new Promise((r) => setTimeout(r, 1500 + Math.random() * 1500));
 async function loadList(url) {
@@ -248,6 +357,22 @@ async function loadOrder(orderId) {
   return "ok" in charges ? { ok: { ...got.ok, charges: charges.ok } } : got;
 }
 var listUrl = (year) => `${AMAZON}/your-orders/orders?timeFilter=year-${year}`;
+async function category(productId) {
+  if (!/^[A-Z0-9]{10}$/.test(productId)) return { ok: null };
+  const cached = await cachedCategory(productId);
+  if (cached.hit) return { ok: cached.category };
+  await pause();
+  const page = await fetchAmazon(`${AMAZON}/dp/${productId}`);
+  if ("blocked" in page) return page;
+  let found = null;
+  if (page.status === 200) {
+    const got = await parse("category", page.html, page.url);
+    if ("blocked" in got) return got;
+    found = "ok" in got ? got.ok : null;
+  }
+  await saveCategory(productId, found);
+  return { ok: found };
+}
 var running = null;
 async function freshToken(ledger, token, expiresAt) {
   if (expiresAt && Date.parse(expiresAt) - Date.now() > REFRESH_DAYS * 864e5) return token;
@@ -264,8 +389,8 @@ function syncNow() {
   running = (async () => {
     const s = await load();
     if (!s.ledger || !s.token) return;
-    if (s.running && s.lastRunAt && Date.now() - Date.parse(s.lastRunAt) < STALE_RUN_MS) return;
-    await save({ running: true });
+    if (s.running && s.runStartedAt && Date.now() - Date.parse(s.runStartedAt) < STALE_RUN_MS) return;
+    await save({ running: true, runStartedAt: (/* @__PURE__ */ new Date()).toISOString() });
     try {
       const ledger = s.ledger;
       const token = await freshToken(ledger, s.token, s.tokenExpiresAt);
@@ -274,6 +399,10 @@ function syncNow() {
           listUrl,
           loadList,
           loadOrder,
+          category,
+          isFinished,
+          markFinished: (ids) => markFinished(ids),
+          clearFinished,
           status: () => status(ledger, token),
           sendOrders: (orders) => sendOrders(ledger, token, orders, crypto.randomUUID()),
           reportRun: async (status2, section, waiting) => {
@@ -282,7 +411,7 @@ function syncNow() {
           pause,
           today: () => (/* @__PURE__ */ new Date()).toISOString().slice(0, 10)
         },
-        { waitingSince: s.waitingSince ?? null }
+        { waitingSince: s.waitingSince ?? null, previousLedgerFrom: s.ledgerFrom ?? null }
       );
       const st = outcome.status === "ok" ? await status(ledger, token).catch(() => null) : null;
       await save({
@@ -290,7 +419,9 @@ function syncNow() {
         lastStatus: outcome.status ?? s.lastStatus,
         failedSection: outcome.failedSection,
         localProblem: outcome.localProblem,
-        ...outcome.status === "ok" ? { waitingSince: outcome.waitingSince, ordersWaiting: outcome.waiting, syncedThrough: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10), syncFrom: outcome.syncFrom } : {},
+        ...outcome.status ? { lastCounts: outcome.counts } : {},
+        ...outcome.ledgerFrom ? { ledgerFrom: outcome.ledgerFrom } : {},
+        ...outcome.status === "ok" ? { waitingSince: outcome.waitingSince, ordersWaiting: outcome.counts.waiting, syncedThrough: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10), syncFrom: outcome.syncFrom } : {},
         ...st ? { chargesSplitThisMonth: st.chargesSplitThisMonth } : outcome.chargesSplitThisMonth !== null ? { chargesSplitThisMonth: outcome.chargesSplitThisMonth } : {}
       });
     } catch {

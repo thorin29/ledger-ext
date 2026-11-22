@@ -4,7 +4,7 @@
  * nothing is kept. Page scripts never run: DOMParser doesn't execute them.
  */
 
-import { BLOCKED, DETAILS, LIST, OUTLINE_WORDS } from "./selectors";
+import { BLOCKED, DETAILS, LIST, OUTLINE_WORDS, PRODUCT } from "./selectors";
 import { cents, clean, fullDate, ORDER_ID, shortDate } from "./text";
 import type { Blocked, ListPage, Section, SyncCharge, SyncItem, SyncOrder } from "../types";
 
@@ -88,7 +88,18 @@ export function parseOrderList(doc: Document, url: string): ListPage {
   }
   if (!orders.length && !LIST.emptyText.test(doc.body?.textContent ?? "")) throw new ParseError("orders_list");
   const next = first(doc, LIST.next)?.getAttribute("href") ?? null;
-  return { orders, nextUrl: next ? new URL(next, url).toString() : null };
+  return { orders, nextUrl: next ? new URL(next, url).toString() : fullPageNext(url, orders.length) };
+}
+
+/**
+ * No "Next" link found but the page is full (Amazon shows 10 at a time): the next page by its
+ * startIndex, so a changed pager doesn't quietly stop the sync at the first page.
+ */
+function fullPageNext(url: string, count: number): string | null {
+  if (count < 10) return null;
+  const next = new URL(url);
+  next.searchParams.set("startIndex", String(Number(next.searchParams.get("startIndex") ?? 0) + count));
+  return next.toString();
 }
 
 function orderDateOf(doc: Document): string | null {
@@ -107,6 +118,14 @@ function quantityOf(block: Element): number {
   return m ? Number(m[1]) : 1;
 }
 
+function productIdOf(block: Element): string | null {
+  for (const a of block.querySelectorAll("a[href]")) {
+    const m = DETAILS.productLink.exec(a.getAttribute("href") ?? "");
+    if (m) return m[1]!;
+  }
+  return null;
+}
+
 function itemFrom(block: Element): Omit<SyncItem, "shipmentKey" | "shipDate"> | null {
   const titleEl = first(block, DETAILS.itemTitle);
   const name = clean(titleEl?.textContent);
@@ -114,7 +133,25 @@ function itemFrom(block: Element): Omit<SyncItem, "shipmentKey" | "shipDate"> | 
   const priceEl = first(block, DETAILS.itemPrice);
   const price = cents(priceEl?.textContent ?? "") ?? cents(block.textContent ?? "");
   if (price === null) return null;
-  return { name, cents: price, quantity: quantityOf(block) };
+  return { name, cents: price, quantity: quantityOf(block), productId: productIdOf(block) };
+}
+
+/**
+ * A product page's category trail, "Grocery & Gourmet Food › Produce", at most 200 characters.
+ * Null when the page doesn't show one (that's not an error).
+ */
+export function parseProductCategory(doc: Document): string | null {
+  const crumbs = all(doc, PRODUCT.breadcrumb)
+    .map((a) => clean(a.textContent))
+    .filter((t) => t && t !== "›" && !PRODUCT.notCategory.test(t));
+  let path = [...new Set(crumbs)].join(" › ");
+  if (!path) {
+    const store = clean(first(doc, PRODUCT.storeName)?.textContent);
+    path = store && !PRODUCT.notCategory.test(store) ? store : "";
+  }
+  if (!path) return null;
+  while (path.length > 200 && path.includes(" › ")) path = path.slice(0, path.lastIndexOf(" › "));
+  return path.slice(0, 200);
 }
 
 /** The charges an order page or invoice lists, refunds and gift cards left out. */

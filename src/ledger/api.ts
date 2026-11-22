@@ -102,6 +102,11 @@ export interface OrdersResult {
   split: number;
   waiting: number;
   waitingSince: string | null;
+  /** Ledger 0.108.0 and later. */
+  noMatch?: number;
+  noChargeList?: number;
+  /** Positions in the batch of orders whose charges are all found. */
+  done?: number[];
 }
 
 export const sendOrders = (base: string, token: string, orders: SyncOrder[], key: string) =>

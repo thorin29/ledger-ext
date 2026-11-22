@@ -21,6 +21,8 @@ var DETAILS = {
   item: ['[data-component="purchasedItems"] > div', '[data-component="purchasedItems"] .a-fixed-left-grid', ".yohtmlc-item", ".a-fixed-left-grid.item-box"],
   itemTitle: ['[data-component="itemTitle"]', ".yohtmlc-product-title", 'a.a-link-normal[href*="/dp/"]', 'a[href*="/dp/"]', 'a[href*="/gp/product/"]'],
   itemPrice: ['[data-component="unitPrice"] .a-offscreen', '[data-component="unitPrice"]', ".a-color-price", ".yohtmlc-item .a-price .a-offscreen"],
+  /** The product id (ASIN) in an item's link. */
+  productLink: /\/(?:dp|gp\/product|gp\/aw\/d)\/([A-Z0-9]{10})(?:[/?#]|$)/,
   itemQuantity: [".od-item-view-qty", ".item-view-qty", '[data-component="quantity"]'],
   quantityText: /(?:qty|quantity)\s*:?\s*(\d{1,3})/i,
   /** "November 19, 2026 - Visa ending in 0000: $25.41" (order page). */
@@ -29,6 +31,14 @@ var DETAILS = {
   chargeOnInvoice: /ending in\s*(\d{4})\s*:\s*([A-Z][a-z]{2,8}\.? \d{1,2}, \d{4})\s*:\s*(\$\s*[\d,]+\.\d{2})/i,
   refundText: /refund|credit(?:ed)? to|returned/i,
   cancelledText: /this order (?:has been|was) cancel|order cancell?ed/i
+};
+var PRODUCT = {
+  /** The category trail above the product title: "Grocery & Gourmet Food › Produce › Potatoes". */
+  breadcrumb: ["#wayfinding-breadcrumbs_feature_div ul li a", "#wayfinding-breadcrumbs_container ul li a", "#wayfinding-breadcrumbs_feature_div a", ".a-breadcrumb li a"],
+  /** Fallback: the store name in the bar under the search box ("Grocery & Gourmet Food"). */
+  storeName: ["#nav-subnav a.nav-b .nav-a-content", "#nav-subnav .nav-b", "#nav-subnav a:first-child"],
+  /** Store names that aren't a category. */
+  notCategory: /^(amazon\.com|all|departments?|deals|today'?s deals|back to results|see all)$/i
 };
 var BLOCKED = {
   signinUrl: /\/ap\/(?:signin|mfa|cvf)|\/ax\/claim/,
@@ -208,7 +218,13 @@ function parseOrderList(doc, url) {
   }
   if (!orders.length && !LIST.emptyText.test(doc.body?.textContent ?? "")) throw new ParseError("orders_list");
   const next = first(doc, LIST.next)?.getAttribute("href") ?? null;
-  return { orders, nextUrl: next ? new URL(next, url).toString() : null };
+  return { orders, nextUrl: next ? new URL(next, url).toString() : fullPageNext(url, orders.length) };
+}
+function fullPageNext(url, count) {
+  if (count < 10) return null;
+  const next = new URL(url);
+  next.searchParams.set("startIndex", String(Number(next.searchParams.get("startIndex") ?? 0) + count));
+  return next.toString();
 }
 function orderDateOf(doc) {
   const el = first(doc, DETAILS.orderDate);
@@ -224,6 +240,13 @@ function quantityOf(block) {
   const m = DETAILS.quantityText.exec(raw || block.textContent || "");
   return m ? Number(m[1]) : 1;
 }
+function productIdOf(block) {
+  for (const a of block.querySelectorAll("a[href]")) {
+    const m = DETAILS.productLink.exec(a.getAttribute("href") ?? "");
+    if (m) return m[1];
+  }
+  return null;
+}
 function itemFrom(block) {
   const titleEl = first(block, DETAILS.itemTitle);
   const name = clean(titleEl?.textContent);
@@ -231,7 +254,18 @@ function itemFrom(block) {
   const priceEl = first(block, DETAILS.itemPrice);
   const price = cents(priceEl?.textContent ?? "") ?? cents(block.textContent ?? "");
   if (price === null) return null;
-  return { name, cents: price, quantity: quantityOf(block) };
+  return { name, cents: price, quantity: quantityOf(block), productId: productIdOf(block) };
+}
+function parseProductCategory(doc) {
+  const crumbs = all(doc, PRODUCT.breadcrumb).map((a) => clean(a.textContent)).filter((t) => t && t !== "\u203A" && !PRODUCT.notCategory.test(t));
+  let path = [...new Set(crumbs)].join(" \u203A ");
+  if (!path) {
+    const store = clean(first(doc, PRODUCT.storeName)?.textContent);
+    path = store && !PRODUCT.notCategory.test(store) ? store : "";
+  }
+  if (!path) return null;
+  while (path.length > 200 && path.includes(" \u203A ")) path = path.slice(0, path.lastIndexOf(" \u203A "));
+  return path.slice(0, 200);
 }
 function chargesIn(doc) {
   const out = [];
@@ -317,6 +351,8 @@ function handle(msg) {
         return { ok: parseOrderDetails(doc, msg.orderId ?? "") };
       case "charges":
         return { ok: chargesIn(doc) };
+      case "category":
+        return { ok: parseProductCategory(doc) };
       case "outline":
         return { outline: outline(doc) };
     }

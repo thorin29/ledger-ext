@@ -3,9 +3,9 @@
  * document: Amazon's scripts don't run and nothing loads. Only the parsed fields go back.
  */
 
-import { blocked, chargesIn, isCancelled, outline, ParseError, parseOrderDetails, parseOrderList } from "./amazon/parse";
+import { blocked, chargesIn, isCancelled, outline, ParseError, parseOrderDetails, parseOrderList, parseProductCategory } from "./amazon/parse";
 
-type Msg = { target: "offscreen"; kind: "list" | "order" | "charges" | "outline"; html: string; url: string; orderId?: string };
+type Msg = { target: "offscreen"; kind: "list" | "order" | "charges" | "category" | "outline"; html: string; url: string; orderId?: string };
 
 function handle(msg: Msg): unknown {
   const doc = new DOMParser().parseFromString(msg.html, "text/html");
@@ -20,6 +20,8 @@ function handle(msg: Msg): unknown {
         return { ok: parseOrderDetails(doc, msg.orderId ?? "") };
       case "charges":
         return { ok: chargesIn(doc) };
+      case "category":
+        return { ok: parseProductCategory(doc) };
       case "outline":
         return { outline: outline(doc) };
     }

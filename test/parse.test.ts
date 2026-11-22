@@ -1,7 +1,7 @@
 // Fixtures are hand-written with invented names, orders, cards and prices.
 import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
-import { blocked, chargesIn, outline, ParseError, parseOrderDetails, parseOrderList } from "../src/amazon/parse";
+import { blocked, chargesIn, outline, ParseError, parseOrderDetails, parseOrderList, parseProductCategory } from "../src/amazon/parse";
 
 const page = (name: string) => new JSDOM(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8")).window.document;
 const BASE = "https://www.amazon.com/your-orders/orders?timeFilter=year-2026";
@@ -31,9 +31,9 @@ describe("order details", () => {
     const o = parseOrderDetails(page("order-new-layout.html"), "111-0000000-0000002");
     expect(o.orderDate).toBe("2026-03-01");
     expect(o.items).toEqual([
-      { name: "Example Multivitamin, 120 Count", cents: 2000, quantity: 1, shipmentKey: "1", shipDate: "2026-03-03" },
-      { name: "Paper Towels, 12 Rolls", cents: 1500, quantity: 2, shipmentKey: "1", shipDate: "2026-03-03" },
-      { name: "Kids Rain Jacket", cents: 103450, quantity: 1, shipmentKey: "2", shipDate: "2026-03-05" },
+      { name: "Example Multivitamin, 120 Count", productId: "B000000001", cents: 2000, quantity: 1, shipmentKey: "1", shipDate: "2026-03-03" },
+      { name: "Paper Towels, 12 Rolls", productId: "B000000002", cents: 1500, quantity: 2, shipmentKey: "1", shipDate: "2026-03-03" },
+      { name: "Kids Rain Jacket", productId: "B000000003", cents: 103450, quantity: 1, shipmentKey: "2", shipDate: "2026-03-05" },
     ]);
     expect(o.charges).toEqual([
       { date: "2026-03-02", cents: 5400, last4: "0000" },
@@ -51,7 +51,7 @@ describe("order details", () => {
   it("reads the older layout", () => {
     const o = parseOrderDetails(page("order-legacy.html"), "111-0000000-0000004");
     expect(o.orderDate).toBe("2026-02-27");
-    expect(o.items).toEqual([{ name: "Building Bricks Castle Set", cents: 6000, quantity: 1, shipmentKey: "1", shipDate: "2026-02-28" }]);
+    expect(o.items).toEqual([{ name: "Building Bricks Castle Set", productId: "B000000004", cents: 6000, quantity: 1, shipmentKey: "1", shipDate: "2026-02-28" }]);
     expect(o.charges).toEqual([]);
   });
 
@@ -66,6 +66,25 @@ describe("order details", () => {
     } catch (e) {
       expect((e as ParseError).section).toBe("order_items");
     }
+  });
+});
+
+describe("order list paging", () => {
+  it("builds the next page from startIndex when a full page has no Next link", () => {
+    const r = parseOrderList(page("orders-list-no-pager.html"), "https://www.amazon.com/your-orders/orders?timeFilter=year-2026&startIndex=10");
+    expect(r.orders).toHaveLength(10);
+    expect(r.nextUrl).toBe("https://www.amazon.com/your-orders/orders?timeFilter=year-2026&startIndex=20");
+  });
+});
+
+describe("product category", () => {
+  it("reads the breadcrumb trail", () => {
+    expect(parseProductCategory(page("product.html"))).toBe("Grocery & Gourmet Food › Produce › Fresh Vegetables");
+  });
+
+  it("falls back to the store name, then to nothing", () => {
+    expect(parseProductCategory(page("product-no-breadcrumb.html"))).toBe("Health & Household");
+    expect(parseProductCategory(page("order-changed.html"))).toBeNull();
   });
 });
 

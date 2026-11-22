@@ -2,6 +2,7 @@
 
 import { normalizeAddress, originPattern, LedgerError } from "../ledger/api";
 import { load, save, type Saved } from "../storage";
+import { countLines } from "../counts";
 
 declare const __VERSION__: string;
 
@@ -34,6 +35,13 @@ function when(iso: string | undefined): string {
   return today ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
+/** "About 8:15 PM", or "Tomorrow about 1:10 AM". */
+function nextLabel(ms: number): string {
+  const d = new Date(ms);
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? `About ${time}` : `Tomorrow about ${time}`;
+}
+
 const dayLabel = (iso: string | null | undefined) => (iso ? new Date(`${iso}T12:00:00`).toLocaleDateString([], { month: "short", day: "numeric" }) : "");
 
 function send<T = { ok?: boolean; error?: string; message?: string; outline?: string }>(msg: unknown): Promise<T> {
@@ -62,16 +70,18 @@ async function render() {
   const problem = problemKey ? PROBLEMS[problemKey] : null;
   $("problem").hidden = !problem;
   $("dot").style.background = problem ? "var(--amber)" : "var(--good)";
-  $("status-word").textContent = s.running ? "Syncing" : problem ? "Sync paused" : "Connected";
-  $("status-when").textContent = s.lastRunAt && !s.running ? `· last sync ${when(s.lastRunAt)}` : "";
+  // A sync that started over 30 minutes ago and never finished has stopped.
+  const running = !!s.running && !!s.runStartedAt && Date.now() - Date.parse(s.runStartedAt) < 30 * 60_000;
+  $("status-word").textContent = running ? "Syncing" : problem ? "Sync paused" : "Connected";
+  $("status-when").textContent = s.lastRunAt && !running ? `· last sync ${when(s.lastRunAt)}` : "";
   if (problem) {
     $("problem-title").textContent = problem.title;
     $("problem-body").textContent = problemKey === "parse_failed" && s.failedSection ? `${problem.body} · ${s.failedSection.replace(/_/g, " ")}` : problem.body;
   }
   currentAction = problem?.action ?? "sync";
   $("main-action").classList.toggle("no-icon", currentAction !== "sync");
-  $("main-label").textContent = s.running && currentAction === "sync" ? "Syncing…" : ACTION_LABEL[currentAction];
-  $<HTMLButtonElement>("main-action").disabled = !!s.running && currentAction === "sync";
+  $("main-label").textContent = running && currentAction === "sync" ? "Syncing…" : ACTION_LABEL[currentAction];
+  $<HTMLButtonElement>("main-action").disabled = running && currentAction === "sync";
 
   $("split").textContent = String(s.chargesSplitThisMonth ?? 0);
   $("waiting").textContent = String(s.ordersWaiting ?? 0);
@@ -79,9 +89,13 @@ async function render() {
   const auto = s.autoSync !== false;
   $("auto").setAttribute("aria-checked", String(auto));
   const alarm = auto ? await chrome.alarms.get("sync") : undefined;
-  $("next").textContent = !auto ? "Off" : alarm ? `About ${when(new Date(alarm.scheduledTime).toISOString())}` : "Soon";
+  $("next").textContent = !auto ? "Off" : alarm ? nextLabel(alarm.scheduledTime) : "Soon";
 
   $("through").textContent = s.syncedThrough ? `Synced through ${dayLabel(s.syncedThrough)}${s.syncFrom ? ` · started from ${dayLabel(s.syncFrom)}` : ""}` : "";
+
+  const [runOrders, runResult] = countLines(s.lastCounts);
+  $("run-orders").textContent = runOrders;
+  $("run-result").textContent = runResult;
 
   const swatches = $("swatches");
   swatches.replaceChildren(

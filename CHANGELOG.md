@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.0]
+
+Needs Ledger 0.108.0 for per-item splits by category.
+
+### Added
+- **Amazon's category for each item.** Each new product's page is read once (with the usual
+  pause) for its category trail, which Ledger uses to place the item. Categories are cached for
+  180 days, at most 2,000 products.
+- Each item's product id is sent too, so a category you fix in Ledger sticks to that product.
+- **Last sync counts** in the popup: orders found, sent, done before, skipped (digital,
+  cancelled, unreadable), split, waiting, no match, no charge list, and how many items got a
+  category.
+
+### Fixed
+- **Orders charged after they were placed were missed.** The sync stopped at orders placed before
+  its start day, but Amazon charges when an order ships. It now reads orders placed up to 30 days
+  earlier.
+- If Your Orders has no Next link on a full page, the next page is still read.
+- Orders whose charges are all split aren't read again (kept as salted hashes, not order
+  numbers). After Amazon splits are removed in Ledger, every order is read again.
+- The popup no longer shows "Syncing" for a sync that stopped.
+
 ## [0.1.0]
 
 First release.
