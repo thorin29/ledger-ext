@@ -122,7 +122,44 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
   const wanted = (orderDate: string | null) =>
     !todoCharges || !orderDate || todoCharges.some((c) => orderDate <= shift(c.date, 1) && orderDate >= shift(c.date, -ORDER_LOOKBACK_DAYS));
 
-  // 1. Your Orders, newest first, back to listFrom.
+  // Reading one order's page; its result counts toward what was found.
+  const remaining = todoCharges ? [...todoCharges] : null;
+  const orders: SyncOrder[] = [];
+  const failures = new Map<Section, number>();
+  let tried = 0;
+  const readOrder = async (id: string): Promise<SyncOrder | Exclude<Blocked, null> | null> => {
+    await deps.pause();
+    tried++;
+    const got = await deps.loadOrder(id);
+    if ("blocked" in got) return got.blocked;
+    if ("failed" in got) {
+      counts.unreadable++;
+      failures.set(got.failed, (failures.get(got.failed) ?? 0) + 1);
+      return null;
+    }
+    if ("skip" in got) {
+      counts.cancelled++;
+      return null;
+    }
+    return got.ok;
+  };
+  const keep = (o: SyncOrder) => {
+    if (!o.charges.length) counts.noChargeList++;
+    if (remaining) {
+      for (const c of o.charges) {
+        const i = remaining.findIndex((u) => sameCharge(c, u));
+        if (i >= 0) {
+          remaining.splice(i, 1);
+          counts.found++;
+        }
+      }
+    }
+    orders.push(o);
+  };
+  const allFound = () => !!remaining && !remaining.length;
+
+  // 1. Your Orders, newest first, back to listFrom. An order whose date the list doesn't show
+  // is opened right away to learn it, and the walk stops at the first one older than needed.
   const ids: string[] = [];
   const seen = new Set<string>();
   let pages = 0;
@@ -145,8 +182,26 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
         fresh++;
         counts.listed++;
         // Digital orders (D01-…) have no shipped items and are charged differently.
-        if (o.orderId.startsWith("D")) counts.digital++;
-        else if (wanted(o.orderDate)) ids.push(o.orderId);
+        if (o.orderId.startsWith("D")) {
+          counts.digital++;
+          continue;
+        }
+        if (o.orderDate) {
+          if (wanted(o.orderDate)) ids.push(o.orderId);
+          continue;
+        }
+        if (await deps.isFinished(o.orderId)) {
+          counts.finished++;
+          continue;
+        }
+        if (tried >= maxOrders || allFound()) break years;
+        const read = await readOrder(o.orderId);
+        if (typeof read === "string") return stopFor(read);
+        if (!read) continue;
+        // Past the start: everything below it on the list is older still.
+        if (read.orderDate < listFrom) break years;
+        if (wanted(read.orderDate)) keep(read);
+        if (allFound()) break years;
       }
       // Every dated order on the page is before the start: done. One odd date doesn't stop it.
       if (dated.length && dated.every((o) => o.orderDate! < listFrom)) break years;
@@ -156,43 +211,17 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
     }
   }
 
-  // 2. Each unfinished order's page, oldest first, until every charge Ledger is missing turns up.
+  // 2. The rest of the orders the list dated, oldest first, until every missing charge turns up.
   const todo: string[] = [];
   for (const id of ids.reverse()) {
     if (await deps.isFinished(id)) counts.finished++;
     else todo.push(id);
   }
-  const remaining = todoCharges ? [...todoCharges] : null;
-  const orders: SyncOrder[] = [];
-  const failures = new Map<Section, number>();
-  let tried = 0;
   for (const id of todo) {
-    if (remaining && !remaining.length) break;
-    if (tried >= maxOrders) break;
-    await deps.pause();
-    tried++;
-    const got = await deps.loadOrder(id);
-    if ("blocked" in got) return stopFor(got.blocked);
-    if ("failed" in got) {
-      counts.unreadable++;
-      failures.set(got.failed, (failures.get(got.failed) ?? 0) + 1);
-      continue;
-    }
-    if ("skip" in got) {
-      counts.cancelled++;
-      continue;
-    }
-    if (!got.ok.charges.length) counts.noChargeList++;
-    if (remaining) {
-      for (const c of got.ok.charges) {
-        const i = remaining.findIndex((u) => sameCharge(c, u));
-        if (i >= 0) {
-          remaining.splice(i, 1);
-          counts.found++;
-        }
-      }
-    }
-    orders.push(got.ok);
+    if (allFound() || tried >= maxOrders) break;
+    const read = await readOrder(id);
+    if (typeof read === "string") return stopFor(read);
+    if (read) keep(read);
   }
   counts.read = orders.length;
   // A page here and there can be odd; most failing, or none readable, means Amazon changed.

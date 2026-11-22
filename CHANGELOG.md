@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2]
+
+### Fixed
+- **No more walking back through old orders.** When Your Orders doesn't show an order's date,
+  the sync opens that order to learn it and stops at the first one older than it needs, instead
+  of treating every undated order as possibly needed.
+
 ## [0.4.1]
 
 ### Fixed

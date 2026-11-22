@@ -102,6 +102,27 @@ describe("runSync with Ledger's unsplit charges", () => {
     expect(out.syncFrom).toBe("2026-03-01");
   });
 
+  it("when the list shows no dates, reads orders newest first and stops at the first one older than needed", async () => {
+    const loaded: string[] = [];
+    const dates: Record<string, string> = {
+      "111-0000000-0000006": "2026-03-10",
+      "111-0000000-0000005": "2026-02-25",
+      "111-0000000-0000004": "2026-01-05", // before Jan 30 (30 days before the charge): stop here
+      "111-0000000-0000003": "2025-12-01",
+    };
+    const { d } = deps({
+      unsplit: async () => [charge("2026-03-01"), charge("2026-03-03", 777)],
+      loadList: async () => ({ ok: { orders: Object.keys(dates).map((orderId) => ({ orderId, orderDate: null })), nextUrl: "next" } }),
+      loadOrder: async (id) => {
+        loaded.push(id);
+        return { ok: { ...order(id, dates[id]!), charges: id.endsWith("5") ? [charge("2026-03-01")] : [] } };
+      },
+    });
+    const out = await runSync(d);
+    expect(loaded).toEqual(["111-0000000-0000006", "111-0000000-0000005", "111-0000000-0000004"]);
+    expect(out.counts).toMatchObject({ found: 1, read: 1 });
+  });
+
   it("counts orders with no charge list and charges still missing", async () => {
     const { d } = deps({
       unsplit: async () => [charge("2026-03-01"), charge("2026-03-02", 555)],

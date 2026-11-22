@@ -170,7 +170,7 @@ async function render() {
     })
   );
 }
-$("version").textContent = `v${"0.4.1"}`;
+$("version").textContent = `v${"0.4.2"}`;
 $("setup-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const err = $("setup-error");

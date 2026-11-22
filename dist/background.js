@@ -319,6 +319,40 @@ async function runSync(deps, opts = {}) {
   out.syncFrom = from;
   const listFrom = shift(from, -ORDER_LOOKBACK_DAYS);
   const wanted = (orderDate) => !todoCharges || !orderDate || todoCharges.some((c) => orderDate <= shift(c.date, 1) && orderDate >= shift(c.date, -ORDER_LOOKBACK_DAYS));
+  const remaining = todoCharges ? [...todoCharges] : null;
+  const orders = [];
+  const failures = /* @__PURE__ */ new Map();
+  let tried = 0;
+  const readOrder = async (id) => {
+    await deps.pause();
+    tried++;
+    const got = await deps.loadOrder(id);
+    if ("blocked" in got) return got.blocked;
+    if ("failed" in got) {
+      counts.unreadable++;
+      failures.set(got.failed, (failures.get(got.failed) ?? 0) + 1);
+      return null;
+    }
+    if ("skip" in got) {
+      counts.cancelled++;
+      return null;
+    }
+    return got.ok;
+  };
+  const keep = (o) => {
+    if (!o.charges.length) counts.noChargeList++;
+    if (remaining) {
+      for (const c of o.charges) {
+        const i = remaining.findIndex((u) => sameCharge(c, u));
+        if (i >= 0) {
+          remaining.splice(i, 1);
+          counts.found++;
+        }
+      }
+    }
+    orders.push(o);
+  };
+  const allFound = () => !!remaining && !remaining.length;
   const ids = [];
   const seen = /* @__PURE__ */ new Set();
   let pages = 0;
@@ -340,8 +374,25 @@ async function runSync(deps, opts = {}) {
         seen.add(o.orderId);
         fresh++;
         counts.listed++;
-        if (o.orderId.startsWith("D")) counts.digital++;
-        else if (wanted(o.orderDate)) ids.push(o.orderId);
+        if (o.orderId.startsWith("D")) {
+          counts.digital++;
+          continue;
+        }
+        if (o.orderDate) {
+          if (wanted(o.orderDate)) ids.push(o.orderId);
+          continue;
+        }
+        if (await deps.isFinished(o.orderId)) {
+          counts.finished++;
+          continue;
+        }
+        if (tried >= maxOrders || allFound()) break years;
+        const read = await readOrder(o.orderId);
+        if (typeof read === "string") return stopFor(read);
+        if (!read) continue;
+        if (read.orderDate < listFrom) break years;
+        if (wanted(read.orderDate)) keep(read);
+        if (allFound()) break years;
       }
       if (dated.length && dated.every((o) => o.orderDate < listFrom)) break years;
       if (!fresh) break;
@@ -353,37 +404,11 @@ async function runSync(deps, opts = {}) {
     if (await deps.isFinished(id)) counts.finished++;
     else todo.push(id);
   }
-  const remaining = todoCharges ? [...todoCharges] : null;
-  const orders = [];
-  const failures = /* @__PURE__ */ new Map();
-  let tried = 0;
   for (const id of todo) {
-    if (remaining && !remaining.length) break;
-    if (tried >= maxOrders) break;
-    await deps.pause();
-    tried++;
-    const got = await deps.loadOrder(id);
-    if ("blocked" in got) return stopFor(got.blocked);
-    if ("failed" in got) {
-      counts.unreadable++;
-      failures.set(got.failed, (failures.get(got.failed) ?? 0) + 1);
-      continue;
-    }
-    if ("skip" in got) {
-      counts.cancelled++;
-      continue;
-    }
-    if (!got.ok.charges.length) counts.noChargeList++;
-    if (remaining) {
-      for (const c of got.ok.charges) {
-        const i = remaining.findIndex((u) => sameCharge(c, u));
-        if (i >= 0) {
-          remaining.splice(i, 1);
-          counts.found++;
-        }
-      }
-    }
-    orders.push(got.ok);
+    if (allFound() || tried >= maxOrders) break;
+    const read = await readOrder(id);
+    if (typeof read === "string") return stopFor(read);
+    if (read) keep(read);
   }
   counts.read = orders.length;
   if (counts.unreadable >= 3 && counts.unreadable * 2 >= tried || counts.unreadable > 0 && counts.read === 0) {
@@ -423,7 +448,7 @@ async function runSync(deps, opts = {}) {
 }
 
 // src/background.ts
-var VERSION = "0.4.1";
+var VERSION = "0.4.2";
 var AMAZON = "https://www.amazon.com";
 var ALARM = "sync";
 var EVERY_MINUTES = 6 * 60;
