@@ -63,6 +63,14 @@ async function connect(base, username, password, code, name) {
 var refresh = (base, token) => call(base, "/api/v1/auth/refresh", { method: "POST", token });
 var logout = (base, token) => call(base, "/api/v1/auth/logout", { method: "POST", token });
 var status = (base, token) => call(base, "/api/v1/amazon/status", { token });
+async function unsplit(base, token) {
+  try {
+    return (await call(base, "/api/v1/amazon/unsplit", { token })).charges;
+  } catch (e) {
+    if (e instanceof LedgerError && e.status === 404) return null;
+    throw e;
+  }
+}
 var sendOrders = (base, token, orders, key) => call(base, "/api/v1/amazon/orders", { method: "POST", token, body: { orders }, idempotencyKey: key });
 var reportRun = (base, token, report, key) => call(base, "/api/v1/amazon/runs", { method: "POST", token, body: report, idempotencyKey: key });
 
@@ -252,8 +260,11 @@ async function clearFinished() {
 
 // src/sync.ts
 var ORDER_LOOKBACK_DAYS = 30;
+var DAY2 = 864e5;
 var localFrom = (e) => e instanceof LedgerError && e.kind === "signed_out" ? "reconnect" : "ledger_unreachable";
-var minusDays = (day, n) => new Date(Date.parse(`${day}T00:00:00Z`) - n * 864e5).toISOString().slice(0, 10);
+var shift = (day, n) => new Date(Date.parse(`${day}T00:00:00Z`) + n * DAY2).toISOString().slice(0, 10);
+var gap = (a, b) => Math.abs(Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / DAY2;
+var sameCharge = (a, b) => Math.abs(a.cents - b.cents) <= 1 && gap(a.date, b.date) <= 5 && !(a.last4 && b.last4 && a.last4 !== b.last4);
 var emptyCounts = () => ({
   listed: 0,
   finished: 0,
@@ -267,7 +278,10 @@ var emptyCounts = () => ({
   noMatch: 0,
   noChargeList: 0,
   items: 0,
-  categorized: 0
+  categorized: 0,
+  unsplit: 0,
+  found: 0,
+  usedTab: 0
 });
 async function runSync(deps, opts = {}) {
   const maxOrders = opts.maxOrders ?? 150;
@@ -276,8 +290,10 @@ async function runSync(deps, opts = {}) {
   const counts = emptyCounts();
   const out = { status: null, failedSection: null, localProblem: null, counts, waitingSince: null, syncFrom: null, ledgerFrom: null, chargesSplitThisMonth: null };
   let st;
+  let todoCharges;
   try {
     st = await deps.status();
+    todoCharges = await deps.unsplit();
   } catch (e) {
     out.localProblem = localFrom(e);
     return out;
@@ -285,12 +301,10 @@ async function runSync(deps, opts = {}) {
   out.chargesSplitThisMonth = st.chargesSplitThisMonth;
   out.ledgerFrom = st.syncFrom;
   if (opts.previousLedgerFrom && st.syncFrom < opts.previousLedgerFrom) await deps.clearFinished();
-  const from = [st.syncFrom, opts.waitingSince].filter((d) => !!d).sort()[0];
-  out.syncFrom = from;
-  const listFrom = minusDays(from, ORDER_LOOKBACK_DAYS);
   const finish = async (status2, section) => {
     out.status = status2;
     out.failedSection = section;
+    counts.usedTab = deps.usedTab() ? 1 : 0;
     try {
       await deps.reportRun(status2, section, counts.waiting);
     } catch (e) {
@@ -299,6 +313,12 @@ async function runSync(deps, opts = {}) {
     return out;
   };
   const stopFor = (b) => finish(b === "signin" ? "amazon_signed_out" : "captcha", null);
+  counts.unsplit = todoCharges ? todoCharges.length : -1;
+  if (todoCharges && !todoCharges.length) return finish("ok", null);
+  const from = todoCharges ? todoCharges.map((c) => c.date).sort()[0] : [st.syncFrom, opts.waitingSince].filter((d) => !!d).sort()[0];
+  out.syncFrom = from;
+  const listFrom = shift(from, -ORDER_LOOKBACK_DAYS);
+  const wanted = (orderDate) => !todoCharges || !orderDate || todoCharges.some((c) => orderDate <= shift(c.date, 1) && orderDate >= shift(c.date, -ORDER_LOOKBACK_DAYS));
   const ids = [];
   const seen = /* @__PURE__ */ new Set();
   let pages = 0;
@@ -321,7 +341,7 @@ async function runSync(deps, opts = {}) {
         fresh++;
         counts.listed++;
         if (o.orderId.startsWith("D")) counts.digital++;
-        else ids.push(o.orderId);
+        else if (wanted(o.orderDate)) ids.push(o.orderId);
       }
       if (dated.length && dated.every((o) => o.orderDate < listFrom)) break years;
       if (!fresh) break;
@@ -333,10 +353,13 @@ async function runSync(deps, opts = {}) {
     if (await deps.isFinished(id)) counts.finished++;
     else todo.push(id);
   }
+  const remaining = todoCharges ? [...todoCharges] : null;
   const orders = [];
   const failures = /* @__PURE__ */ new Map();
   let tried = 0;
-  for (const id of todo.slice(0, maxOrders)) {
+  for (const id of todo) {
+    if (remaining && !remaining.length) break;
+    if (tried >= maxOrders) break;
     await deps.pause();
     tried++;
     const got = await deps.loadOrder(id);
@@ -349,6 +372,16 @@ async function runSync(deps, opts = {}) {
     if ("skip" in got) {
       counts.cancelled++;
       continue;
+    }
+    if (!got.ok.charges.length) counts.noChargeList++;
+    if (remaining) {
+      for (const c of got.ok.charges) {
+        const i = remaining.findIndex((u) => sameCharge(c, u));
+        if (i >= 0) {
+          remaining.splice(i, 1);
+          counts.found++;
+        }
+      }
     }
     orders.push(got.ok);
   }
@@ -377,7 +410,6 @@ async function runSync(deps, opts = {}) {
       counts.split += r.split;
       counts.waiting += r.waiting;
       counts.noMatch += r.noMatch ?? 0;
-      counts.noChargeList += r.noChargeList ?? 0;
       if (r.waitingSince && (!out.waitingSince || r.waitingSince < out.waitingSince)) out.waitingSince = r.waitingSince;
       const done = (r.done ?? []).map((n) => batch[n]?.orderId).filter((id) => !!id);
       if (done.length) await deps.markFinished(done);
@@ -391,7 +423,7 @@ async function runSync(deps, opts = {}) {
 }
 
 // src/background.ts
-var VERSION = "0.3.1";
+var VERSION = "0.4.0";
 var AMAZON = "https://www.amazon.com";
 var ALARM = "sync";
 var EVERY_MINUTES = 6 * 60;
@@ -438,8 +470,19 @@ async function parse(kind, html, url, orderId) {
   await ensureOffscreen();
   return chrome.runtime.sendMessage({ target: "offscreen", kind, html, url, orderId });
 }
+var useTab = false;
 async function readAmazon(url, kind) {
-  return readInTab(url, kind);
+  if (useTab) return readInTab(url, kind);
+  const page = await fetchAmazon(url);
+  if ("blocked" in page) {
+    useTab = true;
+    return readInTab(url, kind);
+  }
+  return page;
+}
+function needsTab(html, got) {
+  if (!("failed" in got)) return false;
+  return got.failed === "order_unavailable" || got.failed === "orders_list" && html.includes("csd-encrypted-sensitive");
 }
 async function fetchAmazon(url) {
   const res = await fetch(url, { credentials: "include", redirect: "follow", cache: "no-store" });
@@ -449,11 +492,21 @@ async function fetchAmazon(url) {
 var pause = () => new Promise((r) => setTimeout(r, 1500 + Math.random() * 1500));
 async function loadList(url) {
   const page = await readAmazon(url, "list");
-  return await parse("list", page.html, page.url);
+  const got = await parse("list", page.html, page.url);
+  if (useTab || !needsTab(page.html, got)) return got;
+  useTab = true;
+  const again = await readInTab(url, "list");
+  return await parse("list", again.html, again.url);
 }
 async function loadOrder(orderId) {
-  const page = await readAmazon(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(orderId)}`, "order");
-  const got = await parse("order", page.html, page.url, orderId);
+  const url = `${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(orderId)}`;
+  const page = await readAmazon(url, "order");
+  let got = await parse("order", page.html, page.url, orderId);
+  if (!useTab && needsTab(page.html, got)) {
+    useTab = true;
+    const again = await readInTab(url, "order");
+    got = await parse("order", again.html, again.url, orderId);
+  }
   if (!("ok" in got) || got.ok.charges.length) return got;
   await pause();
   const invoice = await readAmazon(`${AMAZON}/gp/css/summary/print.html?orderID=${encodeURIComponent(orderId)}`, "invoice");
@@ -495,6 +548,7 @@ function syncNow() {
     if (!s.ledger || !s.token) return;
     if (s.running && s.runStartedAt && Date.now() - Date.parse(s.runStartedAt) < STALE_RUN_MS) return;
     await save({ running: true, runStartedAt: (/* @__PURE__ */ new Date()).toISOString() });
+    useTab = false;
     try {
       const ledger = s.ledger;
       const token = await freshToken(ledger, s.token, s.tokenExpiresAt);
@@ -508,6 +562,8 @@ function syncNow() {
           markFinished: (ids) => markFinished(ids),
           clearFinished,
           status: () => status(ledger, token),
+          unsplit: () => unsplit(ledger, token),
+          usedTab: () => useTab,
           sendOrders: (orders) => sendOrders(ledger, token, orders, crypto.randomUUID()),
           reportRun: async (status2, section, waiting) => {
             await reportRun(ledger, token, { status: status2, failedSection: section, extensionVersion: VERSION, ordersWaiting: waiting }, crypto.randomUUID());
@@ -567,23 +623,53 @@ async function handle(msg) {
       await schedule();
       return { ok: true };
     case "outline": {
-      const list = await readAmazon(listUrl((/* @__PURE__ */ new Date()).getFullYear()), "list");
-      const parts = [];
-      const listOutline = await parse("outline", list.html, list.url);
-      parts.push(`== Your Orders ==
-${listOutline.outline ?? ""}`);
-      const page = await parse("list", list.html, list.url);
-      const id = "ok" in page ? page.ok.orders.find((o) => !o.orderId.startsWith("D"))?.orderId : void 0;
-      if (id) {
-        await pause();
-        const order = await readAmazon(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(id)}`, "order");
-        const o = await parse("outline", order.html, order.url);
-        parts.push(`== Order page ==
-${o.outline ?? ""}`);
+      useTab = false;
+      const outlineOf = async (page) => (await parse("outline", page.html, page.url)).outline ?? "";
+      const readOrder = async (url, orderId) => {
+        let page = await readAmazon(url, "order");
+        let got = await parse("order", page.html, page.url, orderId);
+        if (!useTab && needsTab(page.html, got)) {
+          useTab = true;
+          page = await readInTab(url, "order");
+          got = await parse("order", page.html, page.url, orderId);
+        }
+        return { page, got };
+      };
+      try {
+        const listAddress = listUrl((/* @__PURE__ */ new Date()).getFullYear());
+        let list = await readAmazon(listAddress, "list");
+        let parsed = await parse("list", list.html, list.url);
+        if (!useTab && needsTab(list.html, parsed)) {
+          useTab = true;
+          list = await readInTab(listAddress, "list");
+          parsed = await parse("list", list.html, list.url);
+        }
+        const parts = [`== Your Orders${useTab ? " (tab)" : ""} ==
+${await outlineOf(list)}`];
+        const ids = "ok" in parsed ? parsed.ok.orders.filter((o) => !o.orderId.startsWith("D")).slice(0, 5).map((o) => o.orderId) : [];
+        let first = null;
+        for (const id of ids) {
+          await pause();
+          const { page, got } = await readOrder(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(id)}`, id);
+          first ??= await outlineOf(page);
+          if ("ok" in got && !got.ok.charges.length) {
+            parts.push(`== Order page without a charge list${useTab ? " (tab)" : ""} ==
+${await outlineOf(page)}`);
+            await pause();
+            const invoice = await readAmazon(`${AMAZON}/gp/css/summary/print.html?orderID=${encodeURIComponent(id)}`, "invoice");
+            parts.push(`== Its invoice ==
+${await outlineOf(invoice)}`);
+            first = null;
+            break;
+          }
+        }
+        if (first) parts.push(`== Order page${useTab ? " (tab)" : ""} ==
+${first}`);
+        return { outline: parts.join("\n\n") };
+      } finally {
+        await closeTab();
+        await closeOffscreen();
       }
-      await closeTab();
-      await closeOffscreen();
-      return { outline: parts.join("\n\n") };
     }
   }
 }

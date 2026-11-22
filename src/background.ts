@@ -75,8 +75,28 @@ async function parse<T>(kind: "list" | "order" | "charges" | "category" | "outli
 }
 
 /** Order pages: read in the background sync tab (Amazon only unlocks them in a real page). */
+/**
+ * Order pages are read with a plain request first. Only when Amazon answers with locked order
+ * boxes or "unable to load your order details" does the sync switch to a background tab, for
+ * the rest of that sync.
+ */
+let useTab = false;
+
 async function readAmazon(url: string, kind: PageKind): Promise<{ html: string; url: string }> {
-  return readInTab(url, kind);
+  if (useTab) return readInTab(url, kind);
+  const page = await fetchAmazon(url);
+  if ("blocked" in page) {
+    // A robot check on a plain request: a real page in a tab may still get through.
+    useTab = true;
+    return readInTab(url, kind);
+  }
+  return page;
+}
+
+/** Amazon's answers that only a real page in a tab gets past. */
+function needsTab(html: string, got: Loaded<unknown>): boolean {
+  if (!("failed" in got)) return false;
+  return got.failed === "order_unavailable" || (got.failed === "orders_list" && html.includes("csd-encrypted-sensitive"));
 }
 
 /** Product pages are public and complete as served, so a plain request is enough. */
@@ -91,12 +111,22 @@ const pause = () => new Promise<void>((r) => setTimeout(r, 1500 + Math.random() 
 
 async function loadList(url: string): Promise<Loaded<ListPage>> {
   const page = await readAmazon(url, "list");
-  return (await parse<ListPage>("list", page.html, page.url)) as Loaded<ListPage>;
+  const got = (await parse<ListPage>("list", page.html, page.url)) as Loaded<ListPage>;
+  if (useTab || !needsTab(page.html, got)) return got;
+  useTab = true;
+  const again = await readInTab(url, "list");
+  return (await parse<ListPage>("list", again.html, again.url)) as Loaded<ListPage>;
 }
 
 async function loadOrder(orderId: string): Promise<Loaded<SyncOrder>> {
-  const page = await readAmazon(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(orderId)}`, "order");
-  const got = (await parse<SyncOrder>("order", page.html, page.url, orderId)) as Loaded<SyncOrder>;
+  const url = `${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(orderId)}`;
+  const page = await readAmazon(url, "order");
+  let got = (await parse<SyncOrder>("order", page.html, page.url, orderId)) as Loaded<SyncOrder>;
+  if (!useTab && needsTab(page.html, got)) {
+    useTab = true;
+    const again = await readInTab(url, "order");
+    got = (await parse<SyncOrder>("order", again.html, again.url, orderId)) as Loaded<SyncOrder>;
+  }
   if (!("ok" in got) || got.ok.charges.length) return got;
   // No charge list on the order page: the invoice usually has it.
   await pause();
@@ -147,6 +177,7 @@ export function syncNow(): Promise<void> {
     if (!s.ledger || !s.token) return;
     if (s.running && s.runStartedAt && Date.now() - Date.parse(s.runStartedAt) < STALE_RUN_MS) return;
     await save({ running: true, runStartedAt: new Date().toISOString() });
+    useTab = false;
     try {
       const ledger = s.ledger;
       const token = await freshToken(ledger, s.token, s.tokenExpiresAt);
@@ -160,6 +191,8 @@ export function syncNow(): Promise<void> {
           markFinished: (ids) => markFinished(ids),
           clearFinished,
           status: () => api.status(ledger, token),
+          unsplit: () => api.unsplit(ledger, token),
+          usedTab: () => useTab,
           sendOrders: (orders) => api.sendOrders(ledger, token, orders, crypto.randomUUID()),
           reportRun: async (status: SyncStatus, section: Section | null, waiting: number) => {
             await api.reportRun(ledger, token, { status, failedSection: section, extensionVersion: VERSION, ordersWaiting: waiting }, crypto.randomUUID());
@@ -231,22 +264,51 @@ async function handle(msg: Request): Promise<unknown> {
       await schedule();
       return { ok: true };
     case "outline": {
-      // Your Orders and the first order on it, every word masked, for fixing the selectors.
-      const list = await readAmazon(listUrl(new Date().getFullYear()), "list");
-      const parts: string[] = [];
-      const listOutline = (await parse("outline", list.html, list.url)) as { outline?: string };
-      parts.push(`== Your Orders ==\n${listOutline.outline ?? ""}`);
-      const page = (await parse<ListPage>("list", list.html, list.url)) as Loaded<ListPage>;
-      const id = "ok" in page ? page.ok.orders.find((o) => !o.orderId.startsWith("D"))?.orderId : undefined;
-      if (id) {
-        await pause();
-        const order = await readAmazon(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(id)}`, "order");
-        const o = (await parse("outline", order.html, order.url)) as { outline?: string };
-        parts.push(`== Order page ==\n${o.outline ?? ""}`);
+      // What the sync sees, every word masked: Your Orders, then the first order whose page
+      // has no charge list (with its invoice), or else the first order.
+      useTab = false;
+      const outlineOf = async (page: { html: string; url: string }) => ((await parse("outline", page.html, page.url)) as { outline?: string }).outline ?? "";
+      const readOrder = async (url: string, orderId: string) => {
+        let page = await readAmazon(url, "order");
+        let got = (await parse<SyncOrder>("order", page.html, page.url, orderId)) as Loaded<SyncOrder>;
+        if (!useTab && needsTab(page.html, got)) {
+          useTab = true;
+          page = await readInTab(url, "order");
+          got = (await parse<SyncOrder>("order", page.html, page.url, orderId)) as Loaded<SyncOrder>;
+        }
+        return { page, got };
+      };
+      try {
+        const listAddress = listUrl(new Date().getFullYear());
+        let list = await readAmazon(listAddress, "list");
+        let parsed = (await parse<ListPage>("list", list.html, list.url)) as Loaded<ListPage>;
+        if (!useTab && needsTab(list.html, parsed)) {
+          useTab = true;
+          list = await readInTab(listAddress, "list");
+          parsed = (await parse<ListPage>("list", list.html, list.url)) as Loaded<ListPage>;
+        }
+        const parts = [`== Your Orders${useTab ? " (tab)" : ""} ==\n${await outlineOf(list)}`];
+        const ids = "ok" in parsed ? parsed.ok.orders.filter((o) => !o.orderId.startsWith("D")).slice(0, 5).map((o) => o.orderId) : [];
+        let first: string | null = null;
+        for (const id of ids) {
+          await pause();
+          const { page, got } = await readOrder(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(id)}`, id);
+          first ??= await outlineOf(page);
+          if ("ok" in got && !got.ok.charges.length) {
+            parts.push(`== Order page without a charge list${useTab ? " (tab)" : ""} ==\n${await outlineOf(page)}`);
+            await pause();
+            const invoice = await readAmazon(`${AMAZON}/gp/css/summary/print.html?orderID=${encodeURIComponent(id)}`, "invoice");
+            parts.push(`== Its invoice ==\n${await outlineOf(invoice)}`);
+            first = null;
+            break;
+          }
+        }
+        if (first) parts.push(`== Order page${useTab ? " (tab)" : ""} ==\n${first}`);
+        return { outline: parts.join("\n\n") };
+      } finally {
+        await closeTab();
+        await closeOffscreen();
       }
-      await closeTab();
-      await closeOffscreen();
-      return { outline: parts.join("\n\n") };
     }
   }
 }

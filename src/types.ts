@@ -54,6 +54,19 @@ export interface RunCounts {
   /** Items sent, and how many had Amazon's category. */
   items: number;
   categorized: number;
+  /** Amazon charges Ledger hasn't split yet, at the start of the sync (-1: Ledger too old to say). */
+  unsplit: number;
+  /** Of those, how many turned up in an order's charge list. */
+  found: number;
+  /** 1 when Amazon only showed its pages in a tab. */
+  usedTab: number;
+}
+
+/** An Amazon charge Ledger hasn't split yet. */
+export interface UnsplitCharge {
+  date: string;
+  cents: number;
+  last4: string | null;
 }
 
 export interface ListPage {

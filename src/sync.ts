@@ -1,12 +1,15 @@
 /**
- * One sync: ask Ledger where to start, walk Your Orders back past that day, read each order's
- * page (skipping orders already finished), look up each new product's category, send the
- * orders to Ledger in batches, then tell Ledger how it went. The page loading and Ledger calls
- * are passed in, so this is tested without a browser.
+ * One sync. Ledger says which Amazon charges it hasn't split yet; the extension walks Your
+ * Orders back far enough to cover them, reads only orders placed in the 30 days before one of
+ * those charges, and stops as soon as every charge has turned up in an order's charge list.
+ * Then it looks up each new product's category, sends the orders to Ledger, and reports how it
+ * went. With nothing left to split, it doesn't open Amazon at all.
+ *
+ * The page loading and Ledger calls are passed in, so this is tested without a browser.
  */
 
 import { LedgerError, type OrdersResult, type Status } from "./ledger/api";
-import type { Blocked, ListPage, LocalProblem, RunCounts, Section, SyncOrder, SyncStatus } from "./types";
+import type { Blocked, ListPage, LocalProblem, RunCounts, Section, SyncCharge, SyncOrder, SyncStatus, UnsplitCharge } from "./types";
 
 export type Loaded<T> = { ok: T } | { blocked: Exclude<Blocked, null> } | { failed: Section } | { skip: "cancelled" | true };
 
@@ -21,8 +24,12 @@ export interface SyncDeps {
   markFinished(orderIds: string[]): Promise<void>;
   clearFinished(): Promise<void>;
   status(): Promise<Status>;
+  /** Amazon charges Ledger hasn't split; null when Ledger is too old to say. */
+  unsplit(): Promise<UnsplitCharge[] | null>;
   sendOrders(orders: SyncOrder[]): Promise<OrdersResult>;
   reportRun(status: SyncStatus, failedSection: Section | null, ordersWaiting: number): Promise<void>;
+  /** Whether Amazon's pages had to be read in a tab this run. */
+  usedTab(): boolean;
   /** Waits between Amazon pages so the sync stays gentle. */
   pause(): Promise<void>;
   today(): string;
@@ -51,18 +58,22 @@ export interface SyncOutcome {
   chargesSplitThisMonth: number | null;
 }
 
-/**
- * Amazon charges when an order ships, which can be weeks after it was placed, so orders placed
- * this long before the start day are read too. Finished ones are skipped, so this costs little.
- */
+/** Amazon charges when an order ships, which can be weeks after it was placed. */
 export const ORDER_LOOKBACK_DAYS = 30;
 
+const DAY = 86_400_000;
 const localFrom = (e: unknown): LocalProblem => (e instanceof LedgerError && e.kind === "signed_out" ? "reconnect" : "ledger_unreachable");
-const minusDays = (day: string, n: number) => new Date(Date.parse(`${day}T00:00:00Z`) - n * 86_400_000).toISOString().slice(0, 10);
+const shift = (day: string, n: number) => new Date(Date.parse(`${day}T00:00:00Z`) + n * DAY).toISOString().slice(0, 10);
+const gap = (a: string, b: string) => Math.abs(Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / DAY;
+
+/** The same test Ledger uses: amount within a cent, within five days, and the same card when both show it. */
+export const sameCharge = (a: SyncCharge, b: UnsplitCharge) =>
+  Math.abs(a.cents - b.cents) <= 1 && gap(a.date, b.date) <= 5 && !(a.last4 && b.last4 && a.last4 !== b.last4);
 
 export const emptyCounts = (): RunCounts => ({
   listed: 0, finished: 0, read: 0, sent: 0, digital: 0, cancelled: 0, unreadable: 0,
   split: 0, waiting: 0, noMatch: 0, noChargeList: 0, items: 0, categorized: 0,
+  unsplit: 0, found: 0, usedTab: 0,
 });
 
 export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<SyncOutcome> {
@@ -73,8 +84,10 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
   const out: SyncOutcome = { status: null, failedSection: null, localProblem: null, counts, waitingSince: null, syncFrom: null, ledgerFrom: null, chargesSplitThisMonth: null };
 
   let st: Status;
+  let todoCharges: UnsplitCharge[] | null;
   try {
     st = await deps.status();
+    todoCharges = await deps.unsplit();
   } catch (e) {
     out.localProblem = localFrom(e);
     return out;
@@ -83,13 +96,11 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
   out.ledgerFrom = st.syncFrom;
   // Ledger's start moved back: splits were removed, so finished orders need reading again.
   if (opts.previousLedgerFrom && st.syncFrom < opts.previousLedgerFrom) await deps.clearFinished();
-  const from = [st.syncFrom, opts.waitingSince].filter((d): d is string => !!d).sort()[0]!;
-  out.syncFrom = from;
-  const listFrom = minusDays(from, ORDER_LOOKBACK_DAYS);
 
   const finish = async (status: SyncStatus, section: Section | null): Promise<SyncOutcome> => {
     out.status = status;
     out.failedSection = section;
+    counts.usedTab = deps.usedTab() ? 1 : 0;
     try {
       await deps.reportRun(status, section, counts.waiting);
     } catch (e) {
@@ -98,6 +109,18 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
     return out;
   };
   const stopFor = (b: Exclude<Blocked, null>) => finish(b === "signin" ? "amazon_signed_out" : "captcha", null);
+
+  // What to look for: Ledger's unsplit charges (newer Ledger), or everything since its start day.
+  counts.unsplit = todoCharges ? todoCharges.length : -1;
+  if (todoCharges && !todoCharges.length) return finish("ok", null);
+  const from = todoCharges
+    ? todoCharges.map((c) => c.date).sort()[0]!
+    : [st.syncFrom, opts.waitingSince].filter((d): d is string => !!d).sort()[0]!;
+  out.syncFrom = from;
+  const listFrom = shift(from, -ORDER_LOOKBACK_DAYS);
+  /** Could this order have one of the charges still to find? */
+  const wanted = (orderDate: string | null) =>
+    !todoCharges || !orderDate || todoCharges.some((c) => orderDate <= shift(c.date, 1) && orderDate >= shift(c.date, -ORDER_LOOKBACK_DAYS));
 
   // 1. Your Orders, newest first, back to listFrom.
   const ids: string[] = [];
@@ -123,7 +146,7 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
         counts.listed++;
         // Digital orders (D01-…) have no shipped items and are charged differently.
         if (o.orderId.startsWith("D")) counts.digital++;
-        else ids.push(o.orderId);
+        else if (wanted(o.orderDate)) ids.push(o.orderId);
       }
       // Every dated order on the page is before the start: done. One odd date doesn't stop it.
       if (dated.length && dated.every((o) => o.orderDate! < listFrom)) break years;
@@ -133,16 +156,19 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
     }
   }
 
-  // 2. Each unfinished order's page, oldest first, so a long first sync moves forward run by run.
+  // 2. Each unfinished order's page, oldest first, until every charge Ledger is missing turns up.
   const todo: string[] = [];
   for (const id of ids.reverse()) {
     if (await deps.isFinished(id)) counts.finished++;
     else todo.push(id);
   }
+  const remaining = todoCharges ? [...todoCharges] : null;
   const orders: SyncOrder[] = [];
   const failures = new Map<Section, number>();
   let tried = 0;
-  for (const id of todo.slice(0, maxOrders)) {
+  for (const id of todo) {
+    if (remaining && !remaining.length) break;
+    if (tried >= maxOrders) break;
     await deps.pause();
     tried++;
     const got = await deps.loadOrder(id);
@@ -156,10 +182,20 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
       counts.cancelled++;
       continue;
     }
+    if (!got.ok.charges.length) counts.noChargeList++;
+    if (remaining) {
+      for (const c of got.ok.charges) {
+        const i = remaining.findIndex((u) => sameCharge(c, u));
+        if (i >= 0) {
+          remaining.splice(i, 1);
+          counts.found++;
+        }
+      }
+    }
     orders.push(got.ok);
   }
   counts.read = orders.length;
-  // A page here and there can be odd; most failing means Amazon changed its pages.
+  // A page here and there can be odd; most failing, or none readable, means Amazon changed.
   if ((counts.unreadable >= 3 && counts.unreadable * 2 >= tried) || (counts.unreadable > 0 && counts.read === 0)) {
     const worst = [...failures.entries()].sort((a, b) => b[1] - a[1])[0]![0];
     return finish("parse_failed", worst);
@@ -188,7 +224,6 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
       counts.split += r.split;
       counts.waiting += r.waiting;
       counts.noMatch += r.noMatch ?? 0;
-      counts.noChargeList += r.noChargeList ?? 0;
       if (r.waitingSince && (!out.waitingSince || r.waitingSince < out.waitingSince)) out.waitingSince = r.waitingSince;
       const done = (r.done ?? []).map((n) => batch[n]?.orderId).filter((id): id is string => !!id);
       if (done.length) await deps.markFinished(done);

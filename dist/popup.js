@@ -53,13 +53,23 @@ async function save(patch) {
 
 // src/counts.ts
 function countLines(c) {
-  if (!c) return ["", ""];
+  if (!c) return [];
   const parts = (pairs) => pairs.filter(([, n]) => n > 0).map(([label, n]) => `${label} ${n}`);
-  const skipped = parts([["digital", c.digital], ["cancelled", c.cancelled], ["unreadable", c.unreadable]]);
-  const skipTotal = c.digital + c.cancelled + c.unreadable;
-  const first = [`Orders ${c.listed}`, `Sent ${c.sent}`, ...parts([["Done before", c.finished]]), ...skipTotal ? [`Skipped ${skipTotal} (${skipped.join(", ")})`] : []];
-  const second = [`Split ${c.split}`, ...parts([["Waiting", c.waiting], ["No match", c.noMatch], ["No charge list", c.noChargeList]]), ...c.items ? [`Categories ${c.categorized}/${c.items}`] : []];
-  return [first.join(" \xB7 "), second.join(" \xB7 ")];
+  const lines = [];
+  const unsplit = c.unsplit ?? -1;
+  if (unsplit === 0) lines.push("Nothing left to split");
+  else if (unsplit > 0) lines.push([`Unsplit ${unsplit}`, `Found ${c.found ?? 0}`, ...parts([["Still missing", unsplit - (c.found ?? 0)]])].join(" \xB7 "));
+  if (unsplit !== 0) {
+    const skipped = parts([["digital", c.digital], ["cancelled", c.cancelled], ["unreadable", c.unreadable]]);
+    const skipTotal = c.digital + c.cancelled + c.unreadable;
+    lines.push(
+      [`Orders read ${c.read}`, ...parts([["Done before", c.finished], ["No charge list", c.noChargeList]]), ...skipTotal ? [`Skipped ${skipTotal} (${skipped.join(", ")})`] : []].join(" \xB7 ")
+    );
+    lines.push(
+      [`Split ${c.split}`, ...parts([["Waiting", c.waiting], ["No match", c.noMatch]]), ...c.items ? [`Categories ${c.categorized}/${c.items}`] : [], ...c.usedTab ? ["Read in a tab"] : []].join(" \xB7 ")
+    );
+  }
+  return lines;
 }
 
 // src/popup/popup.ts
@@ -137,11 +147,16 @@ async function render() {
   const alarm = auto ? await chrome.alarms.get("sync") : void 0;
   $("next").textContent = !auto ? "Off" : alarm ? nextLabel(alarm.scheduledTime) : "Soon";
   $("through").textContent = s.syncedThrough ? `Synced through ${dayLabel(s.syncedThrough)}${s.syncFrom ? ` \xB7 started from ${dayLabel(s.syncFrom)}` : ""}` : "";
-  const [runOrders, runResult] = countLines(s.lastCounts);
-  $("run-orders").textContent = runOrders;
-  $("run-result").textContent = runResult;
+  $("run-lines").replaceChildren(
+    ...countLines(s.lastCounts).map((line) => {
+      const p = document.createElement("p");
+      p.className = "muted small";
+      p.textContent = line;
+      return p;
+    })
+  );
   const c = s.lastCounts;
-  $("outline-link").hidden = !c || currentAction === "outline" || !(c.unreadable > 0 || c.listed <= 1);
+  $("outline-link").hidden = !c || currentAction === "outline" || !(c.unreadable > 0 || c.noChargeList > 0 || (c.unsplit ?? -1) > (c.found ?? 0) || c.unsplit !== 0 && c.listed <= 1);
   const swatches = $("swatches");
   swatches.replaceChildren(
     ...ACCENTS.map(([name, color]) => {
@@ -155,7 +170,7 @@ async function render() {
     })
   );
 }
-$("version").textContent = `v${"0.3.1"}`;
+$("version").textContent = `v${"0.4.0"}`;
 $("setup-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const err = $("setup-error");

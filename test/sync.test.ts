@@ -50,6 +50,8 @@ function deps(over: Partial<SyncDeps> = {}) {
       finished.clear();
     },
     status: async () => ({ lastRunAt: null, lastSuccessAt: null, lastStatus: null, chargesSplitThisMonth: 4, ordersWaiting: 0, syncFrom: "2026-02-20" }),
+    unsplit: async () => null,
+    usedTab: () => false,
     sendOrders: async (orders) => {
       sent.push(orders);
       return { matched: orders.length, split: 1, waiting: 1, waitingSince: "2026-03-12", noMatch: 0, noChargeList: 1, done: [0] };
@@ -62,13 +64,67 @@ function deps(over: Partial<SyncDeps> = {}) {
   return { d, sent, reports, loaded, asked, finished, cleared: () => cleared };
 }
 
+describe("runSync with Ledger's unsplit charges", () => {
+  const charge = (date: string, cents = 1083) => ({ date, cents, last4: "0000" });
+
+  it("doesn't open Amazon when nothing is left to split", async () => {
+    const { d, loaded, reports } = deps({ unsplit: async () => [], loadList: async () => { throw new Error("should not load"); } });
+    const out = await runSync(d);
+    expect(loaded).toHaveLength(0);
+    expect(reports).toEqual([["ok", null, 0]]);
+    expect(out.counts).toMatchObject({ unsplit: 0, listed: 0 });
+  });
+
+  it("reads only orders placed in the 30 days before a missing charge, and stops once all are found", async () => {
+    const loaded: string[] = [];
+    const { d } = deps({
+      unsplit: async () => [charge("2026-03-01")],
+      loadList: async () => ({
+        ok: {
+          orders: [
+            { orderId: "111-0000000-0000005", orderDate: "2026-03-12" }, // after the charge: skipped
+            { orderId: "111-0000000-0000004", orderDate: "2026-02-27" },
+            { orderId: "111-0000000-0000003", orderDate: "2026-02-20" },
+            { orderId: "111-0000000-0000002", orderDate: "2026-01-10" }, // more than 30 days before: skipped
+          ],
+          nextUrl: null,
+        },
+      }),
+      loadOrder: async (id) => {
+        loaded.push(id);
+        return { ok: { ...order(id, "2026-02-27"), charges: [charge("2026-03-02")] } };
+      },
+    });
+    const out = await runSync(d);
+    // Oldest first; the first order read has the charge, so the second is never opened.
+    expect(loaded).toEqual(["111-0000000-0000003"]);
+    expect(out.counts).toMatchObject({ unsplit: 1, found: 1, read: 1 });
+    expect(out.syncFrom).toBe("2026-03-01");
+  });
+
+  it("counts orders with no charge list and charges still missing", async () => {
+    const { d } = deps({
+      unsplit: async () => [charge("2026-03-01"), charge("2026-03-02", 555)],
+      loadList: async () => ({ ok: { orders: [{ orderId: "111-0000000-0000004", orderDate: "2026-02-27" }], nextUrl: null } }),
+      loadOrder: async (id) => ({ ok: { ...order(id, "2026-02-27"), charges: [] } }),
+    });
+    const out = await runSync(d);
+    expect(out.counts).toMatchObject({ unsplit: 2, found: 0, noChargeList: 1, read: 1 });
+  });
+
+  it("notes when Amazon's pages needed a tab", async () => {
+    const { d } = deps({ unsplit: async () => [charge("2026-03-01")], usedTab: () => true });
+    expect((await runSync(d)).counts.usedTab).toBe(1);
+  });
+});
+
 describe("runSync", () => {
   it("reads orders placed up to 30 days before the start day, oldest first, and skips digital ones", async () => {
     const { d, loaded, reports } = deps();
     const out = await runSync(d);
     expect(loaded).toEqual(["111-0000000-0000001", "111-0000000-0000002", "111-0000000-0000003"]);
     expect(reports).toEqual([["ok", null, 1]]);
-    expect(out.counts).toMatchObject({ listed: 4, digital: 1, read: 3, sent: 3, split: 1, waiting: 1, noChargeList: 1, items: 3, categorized: 3 });
+    expect(out.counts).toMatchObject({ listed: 4, digital: 1, read: 3, sent: 3, split: 1, waiting: 1, noChargeList: 0, items: 3, categorized: 3, unsplit: -1 });
   });
 
   it("looks up each product's category once and sends it", async () => {

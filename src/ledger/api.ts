@@ -3,7 +3,7 @@
  * Bearer header and never a cookie, so the browser's Ledger or proxy sign-in is never sent.
  */
 
-import type { SyncOrder, SyncStatus } from "../types";
+import type { SyncOrder, SyncStatus, UnsplitCharge } from "../types";
 
 const TIMEOUT_MS = 20_000;
 
@@ -96,6 +96,16 @@ export interface Status {
 }
 
 export const status = (base: string, token: string) => call<Status>(base, "/api/v1/amazon/status", { token });
+
+/** Ledger 0.110.0 and later; null on an older Ledger. */
+export async function unsplit(base: string, token: string): Promise<UnsplitCharge[] | null> {
+  try {
+    return (await call<{ charges: UnsplitCharge[] }>(base, "/api/v1/amazon/unsplit", { token })).charges;
+  } catch (e) {
+    if (e instanceof LedgerError && e.status === 404) return null;
+    throw e;
+  }
+}
 
 export interface OrdersResult {
   matched: number;

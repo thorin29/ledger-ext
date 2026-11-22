@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.0]
+
+Works best with Ledger 0.110.0, which says which Amazon charges aren't split yet.
+
+### Changed
+- **Only the orders it needs.** Ledger lists the Amazon charges it hasn't split; the sync reads
+  only orders placed in the 30 days before one of them, oldest first, and stops as soon as every
+  charge has turned up in an order's charge list. With nothing left to split it doesn't open
+  Amazon at all. (With an older Ledger it reads everything since Ledger's start day, as before.)
+- **The tab only when Amazon insists.** Order pages are read with plain requests first; the
+  background tab opens only if Amazon answers with locked order boxes, "unable to load your order
+  details", or a robot check, and then for the rest of that sync.
+- **Clearer counts:** "Unsplit 25 · Found 18 · Still missing 7", then orders read, orders with no
+  charge list, skipped, split, categories, and whether a tab was needed.
+- **Copy Page Outline** shows Your Orders, the first order whose page has no charge list, and
+  that order's invoice, which is what's needed to fix missing charges. It now also appears when
+  charges are still missing.
+
 ## [0.3.1]
 
 ### Fixed

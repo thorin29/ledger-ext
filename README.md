@@ -4,7 +4,7 @@ A Chrome extension that reads your Amazon orders and sends them to your own
 [Ledger](https://github.com/thorin29/ledger) server, so each Amazon card charge is split by
 item (groceries, household, gifts…) instead of sitting in one category.
 
-It needs Ledger 0.108.0 or later.
+It needs Ledger 0.108.0 or later; 0.110.0 or later lets it read only the orders it still needs.
 
 ## Install
 
@@ -22,9 +22,12 @@ To update, replace the `dist` folder with the new one and click the reload arrow
 
 - Every 6 hours while Chrome is open, and when Chrome starts, it reads **Your Orders** using
   the Amazon sign-in already in your browser. **Sync Now** runs it any time.
-- Amazon only shows order details inside a real page, so the sync opens one tab behind your
-  current one (muted), reads the pages there, and closes it when done. Closing it yourself just
-  stops that sync.
+- Ledger tells it which Amazon charges aren't split yet. It reads only orders placed in the 30
+  days before one of those, and stops once they've all turned up. With nothing to split, it
+  doesn't open Amazon.
+- Pages are read with plain requests. If Amazon only shows order details inside a real page, the
+  sync opens one muted tab behind your current one, reads the pages there, and closes it when
+  done. Closing it yourself just stops that sync.
 - It starts where Ledger's last Amazon split left off (reading orders placed up to 30 days
   earlier, since Amazon charges when an order ships), reads each order's page (and the invoice
   when the order page doesn't list the card charges), reads each new product's page once for its

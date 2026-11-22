@@ -103,12 +103,17 @@ async function render() {
 
   $("through").textContent = s.syncedThrough ? `Synced through ${dayLabel(s.syncedThrough)}${s.syncFrom ? ` · started from ${dayLabel(s.syncFrom)}` : ""}` : "";
 
-  const [runOrders, runResult] = countLines(s.lastCounts);
-  $("run-orders").textContent = runOrders;
-  $("run-result").textContent = runResult;
+  $("run-lines").replaceChildren(
+    ...countLines(s.lastCounts).map((line) => {
+      const p = document.createElement("p");
+      p.className = "muted small";
+      p.textContent = line;
+      return p;
+    }),
+  );
   // A sync that read little or nothing: offer the masked outline even without a problem shown.
   const c = s.lastCounts;
-  $("outline-link").hidden = !c || currentAction === "outline" || !(c.unreadable > 0 || c.listed <= 1);
+  $("outline-link").hidden = !c || currentAction === "outline" || !(c.unreadable > 0 || c.noChargeList > 0 || (c.unsplit ?? -1) > (c.found ?? 0) || (c.unsplit !== 0 && c.listed <= 1));
 
   const swatches = $("swatches");
   swatches.replaceChildren(
