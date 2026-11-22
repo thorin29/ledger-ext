@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.1]
+
+### Fixed
+- **Locked order lists are read in the tab.** When Your Orders arrives with its order boxes
+  locked, the sync now switches to the background tab for the list too, instead of taking a stray
+  order number from elsewhere on the page (which Amazon then refused as "unable to load your order
+  details").
+- While a sync runs, the popup no longer shows the last sync's problem.
+
 ## [0.4.0]
 
 Works best with Ledger 0.110.0, which says which Amazon charges aren't split yet.

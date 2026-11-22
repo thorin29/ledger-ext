@@ -14,6 +14,8 @@ export const LIST = {
   orderLink: ['a[href*="orderID="]', 'a[href*="orderId="]'],
   /** The "Next →" link. */
   next: [".a-pagination .a-last:not(.a-disabled) a[href]", 'a[aria-label*="Next"][href]', 'ul.a-pagination li:last-child a[href]'],
+  /** An order box whose contents Amazon hasn't unlocked yet (its scripts fill these in a real page). */
+  locked: ".csd-encrypted-sensitive",
   /** Shown when a year has no orders, so an empty page isn't mistaken for a broken one. */
   emptyText: /(?:^|\s)0 orders placed|have not placed any orders|no orders (?:placed|found)|looks like you haven't placed/i,
 };

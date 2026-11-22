@@ -423,7 +423,7 @@ async function runSync(deps, opts = {}) {
 }
 
 // src/background.ts
-var VERSION = "0.4.0";
+var VERSION = "0.4.1";
 var AMAZON = "https://www.amazon.com";
 var ALARM = "sync";
 var EVERY_MINUTES = 6 * 60;

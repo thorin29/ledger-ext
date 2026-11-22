@@ -68,12 +68,13 @@ async function render() {
     return;
   }
 
-  const problemKey = s.localProblem ?? (s.lastStatus && s.lastStatus !== "ok" ? s.lastStatus : null);
+  // A sync that started over 30 minutes ago and never finished has stopped.
+  const running = !!s.running && !!s.runStartedAt && Date.now() - Date.parse(s.runStartedAt) < 30 * 60_000;
+  // While a new sync runs, the last one's problem isn't news.
+  const problemKey = running ? null : (s.localProblem ?? (s.lastStatus && s.lastStatus !== "ok" ? s.lastStatus : null));
   const problem = problemKey ? PROBLEMS[problemKey] : null;
   $("problem").hidden = !problem;
   $("dot").style.background = problem ? "var(--amber)" : "var(--good)";
-  // A sync that started over 30 minutes ago and never finished has stopped.
-  const running = !!s.running && !!s.runStartedAt && Date.now() - Date.parse(s.runStartedAt) < 30 * 60_000;
   $("status-word").textContent = running ? "Syncing" : problem ? "Sync paused" : "Connected";
   $("status-when").textContent = s.lastRunAt && !running ? `· last sync ${when(s.lastRunAt)}` : "";
   if (problem) {

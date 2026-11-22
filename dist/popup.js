@@ -122,11 +122,11 @@ async function render() {
     if (s.ledger && !$("ledger").value) $("ledger").value = s.ledger;
     return;
   }
-  const problemKey = s.localProblem ?? (s.lastStatus && s.lastStatus !== "ok" ? s.lastStatus : null);
+  const running = !!s.running && !!s.runStartedAt && Date.now() - Date.parse(s.runStartedAt) < 30 * 6e4;
+  const problemKey = running ? null : s.localProblem ?? (s.lastStatus && s.lastStatus !== "ok" ? s.lastStatus : null);
   const problem = problemKey ? PROBLEMS[problemKey] : null;
   $("problem").hidden = !problem;
   $("dot").style.background = problem ? "var(--amber)" : "var(--good)";
-  const running = !!s.running && !!s.runStartedAt && Date.now() - Date.parse(s.runStartedAt) < 30 * 6e4;
   $("status-word").textContent = running ? "Syncing" : problem ? "Sync paused" : "Connected";
   $("status-when").textContent = s.lastRunAt && !running ? `\xB7 last sync ${when(s.lastRunAt)}` : "";
   if (problem) {
@@ -170,7 +170,7 @@ async function render() {
     })
   );
 }
-$("version").textContent = `v${"0.4.0"}`;
+$("version").textContent = `v${"0.4.1"}`;
 $("setup-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const err = $("setup-error");

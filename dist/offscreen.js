@@ -8,6 +8,8 @@ var LIST = {
   orderLink: ['a[href*="orderID="]', 'a[href*="orderId="]'],
   /** The "Next →" link. */
   next: [".a-pagination .a-last:not(.a-disabled) a[href]", 'a[aria-label*="Next"][href]', "ul.a-pagination li:last-child a[href]"],
+  /** An order box whose contents Amazon hasn't unlocked yet (its scripts fill these in a real page). */
+  locked: ".csd-encrypted-sensitive",
   /** Shown when a year has no orders, so an empty page isn't mistaken for a broken one. */
   emptyText: /(?:^|\s)0 orders placed|have not placed any orders|no orders (?:placed|found)|looks like you haven't placed/i
 };
@@ -204,6 +206,8 @@ function idsIn(el) {
   return [...ids];
 }
 function parseOrderList(doc, url) {
+  const locked = [...doc.querySelectorAll(LIST.locked)].filter((el) => !el.children.length && !clean(el.textContent));
+  if (locked.length) throw new ParseError("orders_list");
   const orders = [];
   const seen = /* @__PURE__ */ new Set();
   for (const card of all(doc, LIST.orderCard)) {
@@ -215,7 +219,7 @@ function parseOrderList(doc, url) {
     const placed = /order placed\s*\n?\s*(.{0,30})/i.exec(text);
     orders.push({ orderId: id, orderDate: (placed && fullDate(placed[1])) ?? fullDate(text) });
   }
-  if (!orders.length) {
+  if (!orders.length && !all(doc, LIST.orderCard).length) {
     for (const id of idsIn(doc.body ?? doc.documentElement)) if (!seen.has(id)) orders.push({ orderId: id, orderDate: null });
   }
   if (!orders.length && !LIST.emptyText.test(doc.body?.textContent ?? "")) throw new ParseError("orders_list");

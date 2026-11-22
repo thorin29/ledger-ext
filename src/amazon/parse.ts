@@ -71,6 +71,10 @@ function idsIn(el: Element): string[] {
 
 /** Your Orders: the orders on this page (newest first) and the next page's address. */
 export function parseOrderList(doc: Document, url: string): ListPage {
+  // Locked order boxes: the real orders aren't on this copy of the page, and any order number
+  // elsewhere on it (a banner, an ad) isn't one of them. Report it so a real page is used.
+  const locked = [...doc.querySelectorAll(LIST.locked)].filter((el) => !el.children.length && !clean(el.textContent));
+  if (locked.length) throw new ParseError("orders_list");
   const orders: ListPage["orders"] = [];
   const seen = new Set<string>();
   for (const card of all(doc, LIST.orderCard)) {
@@ -82,8 +86,8 @@ export function parseOrderList(doc: Document, url: string): ListPage {
     const placed = /order placed\s*\n?\s*(.{0,30})/i.exec(text);
     orders.push({ orderId: id, orderDate: (placed && fullDate(placed[1]!)) ?? fullDate(text) });
   }
-  // No cards found: any order links on the page, without dates.
-  if (!orders.length) {
+  // No order boxes on the page at all: any order links on it, without dates.
+  if (!orders.length && !all(doc, LIST.orderCard).length) {
     for (const id of idsIn(doc.body ?? doc.documentElement)) if (!seen.has(id)) orders.push({ orderId: id, orderDate: null });
   }
   if (!orders.length && !LIST.emptyText.test(doc.body?.textContent ?? "")) throw new ParseError("orders_list");

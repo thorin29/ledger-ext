@@ -70,7 +70,7 @@ describe("order details", () => {
 });
 
 describe("Amazon's locked pages", () => {
-  it("calls an order list with locked boxes unreadable instead of empty", () => {
+  it("calls an order list with locked boxes unreadable, never taking a stray order link from the page", () => {
     expect(() => parseOrderList(page("orders-locked.html"), BASE)).toThrow(ParseError);
   });
 
