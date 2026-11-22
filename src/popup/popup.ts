@@ -90,6 +90,8 @@ async function render() {
   $("main-action").classList.toggle("no-icon", currentAction !== "sync");
   $("main-label").textContent = running && currentAction === "sync" ? "Syncing…" : ACTION_LABEL[currentAction];
   $<HTMLButtonElement>("main-action").disabled = running && currentAction === "sync";
+  // When the main button does something else, Sync Now is still one click away.
+  $("retry").hidden = currentAction === "sync" || running;
 
   $("split").textContent = String(s.chargesSplitThisMonth ?? 0);
   $("waiting").textContent = String(s.ordersWaiting ?? 0);
@@ -189,6 +191,10 @@ $("outline-link").addEventListener("click", () => void copyOutline($("outline-li
 $("auto").addEventListener("click", async () => {
   const on = $("auto").getAttribute("aria-checked") !== "true";
   await send({ type: "auto", on });
+});
+
+$("retry").addEventListener("click", async () => {
+  await send({ type: "sync" });
 });
 
 $("open-ledger").addEventListener("click", async () => {

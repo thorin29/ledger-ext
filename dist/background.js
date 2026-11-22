@@ -391,7 +391,7 @@ async function runSync(deps, opts = {}) {
 }
 
 // src/background.ts
-var VERSION = "0.3.0";
+var VERSION = "0.3.1";
 var AMAZON = "https://www.amazon.com";
 var ALARM = "sync";
 var EVERY_MINUTES = 6 * 60;
@@ -406,9 +406,13 @@ async function schedule() {
   const existing = await chrome.alarms.get(ALARM);
   if (!existing) await chrome.alarms.create(ALARM, { delayInMinutes: 1, periodInMinutes: EVERY_MINUTES });
 }
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async (details) => {
   await save({ running: false });
   await schedule();
+  if (details.reason === "update") {
+    await chrome.storage.local.remove(["lastStatus", "failedSection", "localProblem"]);
+    if ((await load()).token) await chrome.alarms.create("catch-up", { delayInMinutes: 1 });
+  }
 });
 chrome.runtime.onStartup.addListener(async () => {
   await save({ running: false });

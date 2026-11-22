@@ -129,6 +129,7 @@ async function render() {
   $("main-action").classList.toggle("no-icon", currentAction !== "sync");
   $("main-label").textContent = running && currentAction === "sync" ? "Syncing\u2026" : ACTION_LABEL[currentAction];
   $("main-action").disabled = running && currentAction === "sync";
+  $("retry").hidden = currentAction === "sync" || running;
   $("split").textContent = String(s.chargesSplitThisMonth ?? 0);
   $("waiting").textContent = String(s.ordersWaiting ?? 0);
   const auto = s.autoSync !== false;
@@ -154,7 +155,7 @@ async function render() {
     })
   );
 }
-$("version").textContent = `v${"0.3.0"}`;
+$("version").textContent = `v${"0.3.1"}`;
 $("setup-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const err = $("setup-error");
@@ -214,6 +215,9 @@ $("outline-link").addEventListener("click", () => void copyOutline($("outline-li
 $("auto").addEventListener("click", async () => {
   const on = $("auto").getAttribute("aria-checked") !== "true";
   await send({ type: "auto", on });
+});
+$("retry").addEventListener("click", async () => {
+  await send({ type: "sync" });
 });
 $("open-ledger").addEventListener("click", async () => {
   const s = await load();

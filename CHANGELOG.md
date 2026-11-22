@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1]
+
+### Fixed
+- A problem screen (like "Amazon changed its pages") now also offers **Sync Now**, so you can
+  retry without waiting for the next automatic sync.
+- Updating the extension clears the last problem and runs a sync a minute later.
+
 ## [0.3.0]
 
 ### Changed

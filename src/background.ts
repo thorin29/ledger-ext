@@ -32,9 +32,14 @@ async function schedule(): Promise<void> {
 }
 
 // A sync can't still be running when the extension (re)starts.
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async (details) => {
   await save({ running: false });
   await schedule();
+  // An update may fix the last problem: clear it and sync a minute later.
+  if (details.reason === "update") {
+    await chrome.storage.local.remove(["lastStatus", "failedSection", "localProblem"]);
+    if ((await load()).token) await chrome.alarms.create("catch-up", { delayInMinutes: 1 });
+  }
 });
 chrome.runtime.onStartup.addListener(async () => {
   await save({ running: false });
