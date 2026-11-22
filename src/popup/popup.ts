@@ -24,6 +24,8 @@ const PROBLEMS: Record<string, { title: string; body: string; action: "amazon" |
   ledger_error: { title: "Ledger couldn't save the orders", body: "It'll try again next sync.", action: "sync" },
   ledger_unreachable: { title: "Ledger can't be reached", body: "Check that it's running.", action: "sync" },
   reconnect: { title: "Reconnect to Ledger", body: "This extension was signed out.", action: "reconnect" },
+  tab_closed: { title: "Sync stopped", body: "The sync tab was closed. It'll try again next sync.", action: "sync" },
+  amazon_error: { title: "Couldn't open Amazon", body: "It'll try again next sync.", action: "sync" },
 };
 
 const ACTION_LABEL = { amazon: "Open Amazon", outline: "Copy Page Outline", sync: "Sync Now", reconnect: "Reconnect" };
@@ -76,7 +78,13 @@ async function render() {
   $("status-when").textContent = s.lastRunAt && !running ? `· last sync ${when(s.lastRunAt)}` : "";
   if (problem) {
     $("problem-title").textContent = problem.title;
-    $("problem-body").textContent = problemKey === "parse_failed" && s.failedSection ? `${problem.body} · ${s.failedSection.replace(/_/g, " ")}` : problem.body;
+    const unavailable = problemKey === "parse_failed" && s.failedSection === "order_unavailable";
+    $("problem-title").textContent = unavailable ? "Amazon wouldn't show order details" : problem.title;
+    $("problem-body").textContent = unavailable
+      ? "It'll try again next sync."
+      : problemKey === "parse_failed" && s.failedSection
+        ? `${problem.body} · ${s.failedSection.replace(/_/g, " ")}`
+        : problem.body;
   }
   currentAction = problem?.action ?? "sync";
   $("main-action").classList.toggle("no-icon", currentAction !== "sync");

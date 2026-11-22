@@ -30,6 +30,8 @@ var DETAILS = {
   /** "Visa ending in 0000: November 19, 2026: $25.41" (invoice page). */
   chargeOnInvoice: /ending in\s*(\d{4})\s*:\s*([A-Z][a-z]{2,8}\.? \d{1,2}, \d{4})\s*:\s*(\$\s*[\d,]+\.\d{2})/i,
   refundText: /refund|credit(?:ed)? to|returned/i,
+  /** "We're unable to load your order details": Amazon refused this page for now. */
+  unavailable: ['[data-component="errorbanner"] .a-alert-heading', "#orderDetails .a-alert-error .a-alert-heading"],
   cancelledText: /this order (?:has been|was) cancel|order cancell?ed/i
 };
 var PRODUCT = {
@@ -292,7 +294,10 @@ function isCancelled(doc) {
 }
 function parseOrderDetails(doc, orderId) {
   const orderDate = orderDateOf(doc);
-  if (!orderDate) throw new ParseError("order_date");
+  if (!orderDate) {
+    if (first(doc, DETAILS.unavailable)) throw new ParseError("order_unavailable");
+    throw new ParseError("order_date");
+  }
   const items = [];
   const boxes = all(doc, DETAILS.shipment);
   const groups = boxes.length ? boxes.map((root, i) => {

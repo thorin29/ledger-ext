@@ -66,6 +66,109 @@ var status = (base, token) => call(base, "/api/v1/amazon/status", { token });
 var sendOrders = (base, token, orders, key) => call(base, "/api/v1/amazon/orders", { method: "POST", token, body: { orders }, idempotencyKey: key });
 var reportRun = (base, token, report, key) => call(base, "/api/v1/amazon/runs", { method: "POST", token, body: report, idempotencyKey: key });
 
+// src/amazon/tab.ts
+var TabClosedError = class extends Error {
+  constructor() {
+    super("The sync tab was closed");
+    this.name = "TabClosedError";
+  }
+};
+var LOAD_TIMEOUT_MS = 3e4;
+var READY_TIMEOUT_MS = 2e4;
+var POLL_MS = 500;
+var tabId = null;
+function probe(kind) {
+  const d = document;
+  const has = (s) => !!d.querySelector(s);
+  const text = d.body?.innerText ?? "";
+  let ready = d.readyState === "complete";
+  if (has('form[name="signIn"], #ap_email, #ap_password, #captchacharacters')) ready = true;
+  else if (kind === "list") {
+    const locked = [...d.querySelectorAll(".csd-encrypted-sensitive")].filter((el) => !el.children.length && !(el.textContent ?? "").trim());
+    const cards = d.querySelectorAll(".order-card, .js-order-card").length;
+    ready = ready && (cards > 0 && locked.length === 0 || /0 orders placed|haven't placed|have not placed/i.test(text));
+  } else if (kind === "order") {
+    ready = ready && (has('[data-component="purchasedItems"], .yohtmlc-item, [data-component="orderDate"], [data-component="errorbanner"]') || /ordered on|order placed/i.test(text));
+  }
+  return { ready, html: d.documentElement.outerHTML, url: location.href };
+}
+function waitForLoad(id) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, LOAD_TIMEOUT_MS);
+    function done() {
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+      resolve();
+    }
+    function onUpdated(changed, info) {
+      if (changed === id && info.status === "complete") done();
+    }
+    function onRemoved(removed) {
+      if (removed !== id) return;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+      reject(new TabClosedError());
+    }
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onRemoved.addListener(onRemoved);
+  });
+}
+async function tabExists(id) {
+  try {
+    await chrome.tabs.get(id);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function openTab(url) {
+  if (tabId !== null && await tabExists(tabId)) {
+    await chrome.tabs.update(tabId, { url });
+    return tabId;
+  }
+  let windowId;
+  try {
+    windowId = (await chrome.windows.getLastFocused({ windowTypes: ["normal"] })).id;
+  } catch {
+    windowId = void 0;
+  }
+  if (windowId === void 0) {
+    const win = await chrome.windows.create({ url, state: "minimized", focused: false });
+    tabId = win.tabs?.[0]?.id ?? null;
+  } else {
+    const tab = await chrome.tabs.create({ url, active: false, windowId });
+    tabId = tab.id ?? null;
+  }
+  if (tabId === null) throw new TabClosedError();
+  await chrome.tabs.update(tabId, { muted: true }).catch(() => void 0);
+  return tabId;
+}
+async function readInTab(url, kind) {
+  const id = await openTab(url);
+  await waitForLoad(id);
+  const started = Date.now();
+  for (; ; ) {
+    let result;
+    try {
+      const [frame] = await chrome.scripting.executeScript({ target: { tabId: id }, func: probe, args: [kind] });
+      result = frame?.result;
+    } catch {
+      if (!await tabExists(id)) throw new TabClosedError();
+    }
+    if (result && (result.ready || Date.now() - started > READY_TIMEOUT_MS)) return { html: result.html, url: result.url };
+    if (!result && Date.now() - started > READY_TIMEOUT_MS) throw new Error("Couldn't read the page");
+    await new Promise((r) => setTimeout(r, POLL_MS));
+  }
+}
+async function closeTab() {
+  if (tabId === null) return;
+  const id = tabId;
+  tabId = null;
+  await chrome.tabs.remove(id).catch(() => void 0);
+}
+
 // src/storage.ts
 var KEYS = [
   "ledger",
@@ -288,7 +391,7 @@ async function runSync(deps, opts = {}) {
 }
 
 // src/background.ts
-var VERSION = "0.2.1";
+var VERSION = "0.3.0";
 var AMAZON = "https://www.amazon.com";
 var ALARM = "sync";
 var EVERY_MINUTES = 6 * 60;
@@ -331,6 +434,9 @@ async function parse(kind, html, url, orderId) {
   await ensureOffscreen();
   return chrome.runtime.sendMessage({ target: "offscreen", kind, html, url, orderId });
 }
+async function readAmazon(url, kind) {
+  return readInTab(url, kind);
+}
 async function fetchAmazon(url) {
   const res = await fetch(url, { credentials: "include", redirect: "follow", cache: "no-store" });
   if (res.status === 503) return { blocked: "captcha" };
@@ -338,18 +444,15 @@ async function fetchAmazon(url) {
 }
 var pause = () => new Promise((r) => setTimeout(r, 1500 + Math.random() * 1500));
 async function loadList(url) {
-  const page = await fetchAmazon(url);
-  if ("blocked" in page) return page;
+  const page = await readAmazon(url, "list");
   return await parse("list", page.html, page.url);
 }
 async function loadOrder(orderId) {
-  const page = await fetchAmazon(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(orderId)}`);
-  if ("blocked" in page) return page;
+  const page = await readAmazon(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(orderId)}`, "order");
   const got = await parse("order", page.html, page.url, orderId);
   if (!("ok" in got) || got.ok.charges.length) return got;
   await pause();
-  const invoice = await fetchAmazon(`${AMAZON}/gp/css/summary/print.html?orderID=${encodeURIComponent(orderId)}`);
-  if ("blocked" in invoice) return invoice;
+  const invoice = await readAmazon(`${AMAZON}/gp/css/summary/print.html?orderID=${encodeURIComponent(orderId)}`, "invoice");
   const charges = await parse("charges", invoice.html, invoice.url);
   return "ok" in charges ? { ok: { ...got.ok, charges: charges.ok } } : got;
 }
@@ -421,10 +524,12 @@ function syncNow() {
         ...outcome.status === "ok" ? { waitingSince: outcome.waitingSince, ordersWaiting: outcome.counts.waiting, syncedThrough: (/* @__PURE__ */ new Date()).toLocaleDateString("en-CA"), syncFrom: outcome.syncFrom } : {},
         ...st ? { chargesSplitThisMonth: st.chargesSplitThisMonth } : outcome.chargesSplitThisMonth !== null ? { chargesSplitThisMonth: outcome.chargesSplitThisMonth } : {}
       });
-    } catch {
-      await save({ lastRunAt: (/* @__PURE__ */ new Date()).toISOString(), localProblem: "ledger_unreachable" });
+    } catch (e) {
+      const problem = e instanceof TabClosedError ? "tab_closed" : e instanceof LedgerError ? "ledger_unreachable" : "amazon_error";
+      await save({ lastRunAt: (/* @__PURE__ */ new Date()).toISOString(), localProblem: problem });
     } finally {
       await save({ running: false });
+      await closeTab();
       await closeOffscreen();
     }
   })().finally(() => {
@@ -458,8 +563,7 @@ async function handle(msg) {
       await schedule();
       return { ok: true };
     case "outline": {
-      const list = await fetchAmazon(listUrl((/* @__PURE__ */ new Date()).getFullYear()));
-      if ("blocked" in list) return { error: list.blocked };
+      const list = await readAmazon(listUrl((/* @__PURE__ */ new Date()).getFullYear()), "list");
       const parts = [];
       const listOutline = await parse("outline", list.html, list.url);
       parts.push(`== Your Orders ==
@@ -468,13 +572,12 @@ ${listOutline.outline ?? ""}`);
       const id = "ok" in page ? page.ok.orders.find((o) => !o.orderId.startsWith("D"))?.orderId : void 0;
       if (id) {
         await pause();
-        const order = await fetchAmazon(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(id)}`);
-        if (!("blocked" in order)) {
-          const o = await parse("outline", order.html, order.url);
-          parts.push(`== Order page ==
+        const order = await readAmazon(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(id)}`, "order");
+        const o = await parse("outline", order.html, order.url);
+        parts.push(`== Order page ==
 ${o.outline ?? ""}`);
-        }
       }
+      await closeTab();
       await closeOffscreen();
       return { outline: parts.join("\n\n") };
     }

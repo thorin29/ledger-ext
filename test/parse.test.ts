@@ -69,6 +69,21 @@ describe("order details", () => {
   });
 });
 
+describe("Amazon's locked pages", () => {
+  it("calls an order list with locked boxes unreadable instead of empty", () => {
+    expect(() => parseOrderList(page("orders-locked.html"), BASE)).toThrow(ParseError);
+  });
+
+  it("tells Amazon's 'unable to load' banner apart from a changed page", () => {
+    try {
+      parseOrderDetails(page("order-unavailable.html"), "x");
+      throw new Error("should have failed");
+    } catch (e) {
+      expect((e as ParseError).section).toBe("order_unavailable");
+    }
+  });
+});
+
 describe("order list paging", () => {
   it("builds the next page from startIndex when a full page has no Next link", () => {
     const r = parseOrderList(page("orders-list-no-pager.html"), "https://www.amazon.com/your-orders/orders?timeFilter=year-2026&startIndex=10");

@@ -5,6 +5,7 @@
  */
 
 import * as api from "./ledger/api";
+import { closeTab, readInTab, TabClosedError, type PageKind } from "./amazon/tab";
 import { cachedCategory, clearFinished, forget, isFinished, load, markFinished, save, saveCategory } from "./storage";
 import { runSync, type Loaded } from "./sync";
 import type { ListPage, Section, SyncOrder, SyncStatus } from "./types";
@@ -68,6 +69,12 @@ async function parse<T>(kind: "list" | "order" | "charges" | "category" | "outli
   return chrome.runtime.sendMessage({ target: "offscreen", kind, html, url, orderId });
 }
 
+/** Order pages: read in the background sync tab (Amazon only unlocks them in a real page). */
+async function readAmazon(url: string, kind: PageKind): Promise<{ html: string; url: string }> {
+  return readInTab(url, kind);
+}
+
+/** Product pages are public and complete as served, so a plain request is enough. */
 async function fetchAmazon(url: string): Promise<{ html: string; url: string; status: number } | { blocked: "captcha" | "signin" }> {
   const res = await fetch(url, { credentials: "include", redirect: "follow", cache: "no-store" });
   // Amazon answers a robot check with 503.
@@ -78,20 +85,17 @@ async function fetchAmazon(url: string): Promise<{ html: string; url: string; st
 const pause = () => new Promise<void>((r) => setTimeout(r, 1500 + Math.random() * 1500));
 
 async function loadList(url: string): Promise<Loaded<ListPage>> {
-  const page = await fetchAmazon(url);
-  if ("blocked" in page) return page;
+  const page = await readAmazon(url, "list");
   return (await parse<ListPage>("list", page.html, page.url)) as Loaded<ListPage>;
 }
 
 async function loadOrder(orderId: string): Promise<Loaded<SyncOrder>> {
-  const page = await fetchAmazon(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(orderId)}`);
-  if ("blocked" in page) return page;
+  const page = await readAmazon(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(orderId)}`, "order");
   const got = (await parse<SyncOrder>("order", page.html, page.url, orderId)) as Loaded<SyncOrder>;
   if (!("ok" in got) || got.ok.charges.length) return got;
   // No charge list on the order page: the invoice usually has it.
   await pause();
-  const invoice = await fetchAmazon(`${AMAZON}/gp/css/summary/print.html?orderID=${encodeURIComponent(orderId)}`);
-  if ("blocked" in invoice) return invoice;
+  const invoice = await readAmazon(`${AMAZON}/gp/css/summary/print.html?orderID=${encodeURIComponent(orderId)}`, "invoice");
   const charges = (await parse<SyncOrder["charges"]>("charges", invoice.html, invoice.url)) as Loaded<SyncOrder["charges"]>;
   return "ok" in charges ? { ok: { ...got.ok, charges: charges.ok } } : got;
 }
@@ -173,10 +177,12 @@ export function syncNow(): Promise<void> {
           : {}),
         ...(st ? { chargesSplitThisMonth: st.chargesSplitThisMonth } : outcome.chargesSplitThisMonth !== null ? { chargesSplitThisMonth: outcome.chargesSplitThisMonth } : {}),
       });
-    } catch {
-      await save({ lastRunAt: new Date().toISOString(), localProblem: "ledger_unreachable" });
+    } catch (e) {
+      const problem = e instanceof TabClosedError ? "tab_closed" : e instanceof api.LedgerError ? "ledger_unreachable" : "amazon_error";
+      await save({ lastRunAt: new Date().toISOString(), localProblem: problem });
     } finally {
       await save({ running: false });
+      await closeTab();
       await closeOffscreen();
     }
   })().finally(() => {
@@ -221,8 +227,7 @@ async function handle(msg: Request): Promise<unknown> {
       return { ok: true };
     case "outline": {
       // Your Orders and the first order on it, every word masked, for fixing the selectors.
-      const list = await fetchAmazon(listUrl(new Date().getFullYear()));
-      if ("blocked" in list) return { error: list.blocked };
+      const list = await readAmazon(listUrl(new Date().getFullYear()), "list");
       const parts: string[] = [];
       const listOutline = (await parse("outline", list.html, list.url)) as { outline?: string };
       parts.push(`== Your Orders ==\n${listOutline.outline ?? ""}`);
@@ -230,12 +235,11 @@ async function handle(msg: Request): Promise<unknown> {
       const id = "ok" in page ? page.ok.orders.find((o) => !o.orderId.startsWith("D"))?.orderId : undefined;
       if (id) {
         await pause();
-        const order = await fetchAmazon(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(id)}`);
-        if (!("blocked" in order)) {
-          const o = (await parse("outline", order.html, order.url)) as { outline?: string };
-          parts.push(`== Order page ==\n${o.outline ?? ""}`);
-        }
+        const order = await readAmazon(`${AMAZON}/gp/your-account/order-details?orderID=${encodeURIComponent(id)}`, "order");
+        const o = (await parse("outline", order.html, order.url)) as { outline?: string };
+        parts.push(`== Order page ==\n${o.outline ?? ""}`);
       }
+      await closeTab();
       await closeOffscreen();
       return { outline: parts.join("\n\n") };
     }

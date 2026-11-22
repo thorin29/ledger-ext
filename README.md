@@ -21,8 +21,10 @@ To update, replace the `dist` folder with the new one and click the reload arrow
 ## How it works
 
 - Every 6 hours while Chrome is open, and when Chrome starts, it reads **Your Orders** using
-  the Amazon sign-in already in your browser. No Amazon tab needs to be open. **Sync Now** runs
-  it any time.
+  the Amazon sign-in already in your browser. **Sync Now** runs it any time.
+- Amazon only shows order details inside a real page, so the sync opens one tab behind your
+  current one (muted), reads the pages there, and closes it when done. Closing it yourself just
+  stops that sync.
 - It starts where Ledger's last Amazon split left off (reading orders placed up to 30 days
   earlier, since Amazon charges when an order ships), reads each order's page (and the invoice
   when the order page doesn't list the card charges), reads each new product's page once for its
@@ -35,8 +37,9 @@ To update, replace the `dist` folder with the new one and click the reload arrow
 
 ## What it reads, keeps and sends
 
-- **Reads:** Amazon's order pages, with GET requests only. It never clicks, buys or changes
-  anything on Amazon and never reads your cookies.
+- **Reads:** Amazon's order pages in its own background tab, and product pages with plain GET
+  requests. It never clicks, buys or changes anything on Amazon and never reads your cookies.
+  The `scripting` permission only lets it read pages on amazon.com.
 - **Keeps from each page:** order number and date, item names, product ids, prices and
   quantities, ship dates, each card charge's date, amount and last 4 digits, and each product's
   category. Names, addresses, gift

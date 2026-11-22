@@ -31,10 +31,10 @@ export interface SyncOrder {
 export type SyncStatus = "ok" | "amazon_signed_out" | "captcha" | "parse_failed" | "ledger_error";
 
 /** Problems only the extension sees (Ledger can't be told about these). */
-export type LocalProblem = "ledger_unreachable" | "reconnect";
+export type LocalProblem = "ledger_unreachable" | "reconnect" | "tab_closed" | "amazon_error";
 
 /** Which part of a page couldn't be read. Sent to Ledger as a code, never page content. */
-export type Section = "orders_list" | "order_date" | "order_items" | "order_charges";
+export type Section = "orders_list" | "order_date" | "order_items" | "order_charges" | "order_unavailable";
 
 /** What the last sync did, shown in the popup. Counts only. */
 export interface RunCounts {

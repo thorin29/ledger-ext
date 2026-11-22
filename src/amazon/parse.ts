@@ -186,7 +186,11 @@ export function isCancelled(doc: Document): boolean {
  */
 export function parseOrderDetails(doc: Document, orderId: string): SyncOrder {
   const orderDate = orderDateOf(doc);
-  if (!orderDate) throw new ParseError("order_date");
+  if (!orderDate) {
+    // Amazon's own "unable to load your order details" banner, not a page we can't read.
+    if (first(doc, DETAILS.unavailable)) throw new ParseError("order_unavailable");
+    throw new ParseError("order_date");
+  }
   const items: SyncItem[] = [];
   const boxes = all(doc, DETAILS.shipment);
   const groups: Array<{ key: string; root: Element; shipDate: string | null }> = boxes.length

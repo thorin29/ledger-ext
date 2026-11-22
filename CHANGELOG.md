@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0]
+
+### Changed
+- **Orders are read in a background tab.** Amazon now unlocks order details only inside a real
+  page (its own scripts decrypt them), so the sync opens one tab behind your current one, reads
+  Your Orders and each order there, and closes it when done. Product pages are still read without
+  a tab. Adds Chrome's `scripting` permission, limited to amazon.com.
+- **Copy Page Outline** reads the pages the same way, so it shows what the sync sees.
+
+### Fixed
+- An order list whose boxes never unlocked is reported as unreadable, not as a year with no
+  orders.
+- Amazon's "unable to load your order details" page is told apart from a changed page
+  ("Amazon wouldn't show order details").
+- Closing the sync tab stops the sync quietly ("Sync stopped"); it tries again next time.
+
 ## [0.2.1]
 
 ### Fixed

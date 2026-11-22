@@ -77,7 +77,9 @@ var PROBLEMS = {
   parse_failed: { title: "Amazon changed its pages", body: "Update the extension", action: "outline" },
   ledger_error: { title: "Ledger couldn't save the orders", body: "It'll try again next sync.", action: "sync" },
   ledger_unreachable: { title: "Ledger can't be reached", body: "Check that it's running.", action: "sync" },
-  reconnect: { title: "Reconnect to Ledger", body: "This extension was signed out.", action: "reconnect" }
+  reconnect: { title: "Reconnect to Ledger", body: "This extension was signed out.", action: "reconnect" },
+  tab_closed: { title: "Sync stopped", body: "The sync tab was closed. It'll try again next sync.", action: "sync" },
+  amazon_error: { title: "Couldn't open Amazon", body: "It'll try again next sync.", action: "sync" }
 };
 var ACTION_LABEL = { amazon: "Open Amazon", outline: "Copy Page Outline", sync: "Sync Now", reconnect: "Reconnect" };
 function when(iso) {
@@ -119,7 +121,9 @@ async function render() {
   $("status-when").textContent = s.lastRunAt && !running ? `\xB7 last sync ${when(s.lastRunAt)}` : "";
   if (problem) {
     $("problem-title").textContent = problem.title;
-    $("problem-body").textContent = problemKey === "parse_failed" && s.failedSection ? `${problem.body} \xB7 ${s.failedSection.replace(/_/g, " ")}` : problem.body;
+    const unavailable = problemKey === "parse_failed" && s.failedSection === "order_unavailable";
+    $("problem-title").textContent = unavailable ? "Amazon wouldn't show order details" : problem.title;
+    $("problem-body").textContent = unavailable ? "It'll try again next sync." : problemKey === "parse_failed" && s.failedSection ? `${problem.body} \xB7 ${s.failedSection.replace(/_/g, " ")}` : problem.body;
   }
   currentAction = problem?.action ?? "sync";
   $("main-action").classList.toggle("no-icon", currentAction !== "sync");
@@ -150,7 +154,7 @@ async function render() {
     })
   );
 }
-$("version").textContent = `v${"0.2.1"}`;
+$("version").textContent = `v${"0.3.0"}`;
 $("setup-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const err = $("setup-error");
