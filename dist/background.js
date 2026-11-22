@@ -85,6 +85,23 @@ var LOAD_TIMEOUT_MS = 3e4;
 var READY_TIMEOUT_MS = 2e4;
 var POLL_MS = 500;
 var tabId = null;
+var cancelled = false;
+chrome.tabs.onRemoved.addListener((removed) => {
+  if (removed === tabId) {
+    tabId = null;
+    cancelled = true;
+  }
+});
+function resetTab() {
+  cancelled = false;
+}
+async function stopTab() {
+  cancelled = true;
+  await closeTab();
+}
+function checkStopped() {
+  if (cancelled) throw new TabClosedError();
+}
 function probe(kind) {
   const d = document;
   const has = (s) => !!d.querySelector(s);
@@ -132,6 +149,7 @@ async function tabExists(id) {
   }
 }
 async function openTab(url) {
+  checkStopped();
   if (tabId !== null && await tabExists(tabId)) {
     await chrome.tabs.update(tabId, { url });
     return tabId;
@@ -356,6 +374,7 @@ async function runSync(deps, opts = {}) {
   const ids = [];
   const seen = /* @__PURE__ */ new Set();
   let pages = 0;
+  let blind = 0;
   const thisYear = Number(deps.today().slice(0, 4));
   years: for (let year = thisYear; year >= Number(listFrom.slice(0, 4)); year--) {
     let url = deps.listUrl(year);
@@ -389,7 +408,11 @@ async function runSync(deps, opts = {}) {
         if (tried >= maxOrders || allFound()) break years;
         const read = await readOrder(o.orderId);
         if (typeof read === "string") return stopFor(read);
-        if (!read) continue;
+        if (!read) {
+          if (++blind >= 3) break years;
+          continue;
+        }
+        blind = 0;
         if (read.orderDate < listFrom) break years;
         if (wanted(read.orderDate)) keep(read);
         if (allFound()) break years;
@@ -448,7 +471,7 @@ async function runSync(deps, opts = {}) {
 }
 
 // src/background.ts
-var VERSION = "0.4.2";
+var VERSION = "0.4.3";
 var AMAZON = "https://www.amazon.com";
 var ALARM = "sync";
 var EVERY_MINUTES = 6 * 60;
@@ -468,7 +491,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   await schedule();
   if (details.reason === "update") {
     await chrome.storage.local.remove(["lastStatus", "failedSection", "localProblem"]);
-    if ((await load()).token) await chrome.alarms.create("catch-up", { delayInMinutes: 1 });
+    const s = await load();
+    if (s.token && s.autoSync !== false) await chrome.alarms.create("catch-up", { delayInMinutes: 1 });
   }
 });
 chrome.runtime.onStartup.addListener(async () => {
@@ -479,8 +503,10 @@ chrome.runtime.onStartup.addListener(async () => {
     await chrome.alarms.create("catch-up", { delayInMinutes: 1 });
   }
 });
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === ALARM || alarm.name === "catch-up") void syncNow();
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== ALARM && alarm.name !== "catch-up") return;
+  if ((await load()).autoSync === false) return;
+  void syncNow();
 });
 async function ensureOffscreen() {
   const url = chrome.runtime.getURL("offscreen.html");
@@ -497,6 +523,7 @@ async function parse(kind, html, url, orderId) {
 }
 var useTab = false;
 async function readAmazon(url, kind) {
+  checkStopped();
   if (useTab) return readInTab(url, kind);
   const page = await fetchAmazon(url);
   if ("blocked" in page) {
@@ -543,6 +570,7 @@ async function category(productId) {
   if (!/^[A-Z0-9]{10}$/.test(productId)) return { ok: null };
   const cached = await cachedCategory(productId);
   if (cached.hit) return { ok: cached.category };
+  checkStopped();
   await pause();
   const page = await fetchAmazon(`${AMAZON}/dp/${productId}`);
   if ("blocked" in page) return page;
@@ -574,6 +602,7 @@ function syncNow() {
     if (s.running && s.runStartedAt && Date.now() - Date.parse(s.runStartedAt) < STALE_RUN_MS) return;
     await save({ running: true, runStartedAt: (/* @__PURE__ */ new Date()).toISOString() });
     useTab = false;
+    resetTab();
     try {
       const ledger = s.ledger;
       const token = await freshToken(ledger, s.token, s.tokenExpiresAt);
@@ -643,12 +672,16 @@ async function handle(msg) {
     case "sync":
       void syncNow();
       return { ok: true };
+    case "stop":
+      await stopTab();
+      return { ok: true };
     case "auto":
       await save({ autoSync: msg.on });
       await schedule();
       return { ok: true };
     case "outline": {
       useTab = false;
+      resetTab();
       const outlineOf = async (page) => (await parse("outline", page.html, page.url)).outline ?? "";
       const readOrder = async (url, orderId) => {
         let page = await readAmazon(url, "order");

@@ -123,6 +123,21 @@ describe("runSync with Ledger's unsplit charges", () => {
     expect(out.counts).toMatchObject({ found: 1, read: 1 });
   });
 
+  it("stops walking when three undated orders in a row can't be opened", async () => {
+    const loaded: string[] = [];
+    const { d, reports } = deps({
+      unsplit: async () => [charge("2026-03-01")],
+      loadList: async (url) => ({ ok: { orders: Array.from({ length: 10 }, (_, i) => ({ orderId: `111-0000000-00000${10 + i + (url === "next" ? 10 : 0)}`, orderDate: null })), nextUrl: "next" } }),
+      loadOrder: async (id) => {
+        loaded.push(id);
+        return { failed: "order_unavailable" };
+      },
+    });
+    await runSync(d);
+    expect(loaded).toHaveLength(3);
+    expect(reports[0]).toEqual(["parse_failed", "order_unavailable", 0]);
+  });
+
   it("counts orders with no charge list and charges still missing", async () => {
     const { d } = deps({
       unsplit: async () => [charge("2026-03-01"), charge("2026-03-02", 555)],

@@ -24,11 +24,11 @@ const PROBLEMS: Record<string, { title: string; body: string; action: "amazon" |
   ledger_error: { title: "Ledger couldn't save the orders", body: "It'll try again next sync.", action: "sync" },
   ledger_unreachable: { title: "Ledger can't be reached", body: "Check that it's running.", action: "sync" },
   reconnect: { title: "Reconnect to Ledger", body: "This extension was signed out.", action: "reconnect" },
-  tab_closed: { title: "Sync stopped", body: "The sync tab was closed. It'll try again next sync.", action: "sync" },
+  tab_closed: { title: "Sync stopped", body: "It'll try again next sync.", action: "sync" },
   amazon_error: { title: "Couldn't open Amazon", body: "It'll try again next sync.", action: "sync" },
 };
 
-const ACTION_LABEL = { amazon: "Open Amazon", outline: "Copy Page Outline", sync: "Sync Now", reconnect: "Reconnect" };
+const ACTION_LABEL = { amazon: "Open Amazon", outline: "Copy Page Outline", sync: "Sync Now", reconnect: "Reconnect", stop: "Stop Sync" };
 
 function when(iso: string | undefined): string {
   if (!iso) return "";
@@ -87,10 +87,10 @@ async function render() {
         ? `${problem.body} · ${s.failedSection.replace(/_/g, " ")}`
         : problem.body;
   }
-  currentAction = problem?.action ?? "sync";
+  currentAction = running ? "stop" : (problem?.action ?? "sync");
   $("main-action").classList.toggle("no-icon", currentAction !== "sync");
-  $("main-label").textContent = running && currentAction === "sync" ? "Syncing…" : ACTION_LABEL[currentAction];
-  $<HTMLButtonElement>("main-action").disabled = running && currentAction === "sync";
+  $("main-label").textContent = ACTION_LABEL[currentAction];
+  $<HTMLButtonElement>("main-action").disabled = false;
   // When the main button does something else, Sync Now is still one click away.
   $("retry").hidden = currentAction === "sync" || running;
 
@@ -171,6 +171,10 @@ $("main-action").addEventListener("click", async () => {
       return;
     case "outline":
       await copyOutline($("main-label"), ACTION_LABEL.outline);
+      return;
+    case "stop":
+      $("main-label").textContent = "Stopping…";
+      await send({ type: "stop" });
       return;
     default:
       await send({ type: "sync" });

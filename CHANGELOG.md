@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.3]
+
+### Fixed
+- **Closing the sync tab stops the sync.** Before, closing it between pages just opened a new one.
+- **Stop Sync** button while a sync runs.
+- With **Sync automatically** off, nothing syncs on its own, including the sync after an update.
+- When Your Orders shows no dates and three orders in a row can't be opened, the sync stops
+  instead of walking further back.
+
 ## [0.4.2]
 
 ### Fixed

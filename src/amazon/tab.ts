@@ -19,6 +19,31 @@ const READY_TIMEOUT_MS = 20_000;
 const POLL_MS = 500;
 
 let tabId: number | null = null;
+/** Set when the person closes the sync tab or clicks Stop: no new tab opens until the next sync. */
+let cancelled = false;
+
+chrome.tabs.onRemoved.addListener((removed) => {
+  if (removed === tabId) {
+    tabId = null;
+    cancelled = true;
+  }
+});
+
+/** A new sync: forget an earlier Stop. */
+export function resetTab(): void {
+  cancelled = false;
+}
+
+/** Stop: close the tab and refuse to open another until the next sync. */
+export async function stopTab(): Promise<void> {
+  cancelled = true;
+  await closeTab();
+}
+
+/** Throws if the sync was stopped, so plain requests stop too. */
+export function checkStopped(): void {
+  if (cancelled) throw new TabClosedError();
+}
 
 /** Runs inside the Amazon page. Says whether Amazon has finished filling it in, and returns it. */
 function probe(kind: PageKind): { ready: boolean; html: string; url: string } {
@@ -73,6 +98,7 @@ async function tabExists(id: number): Promise<boolean> {
 
 /** The sync tab: behind the current tab in the last window used, or a minimized window if none is open. */
 async function openTab(url: string): Promise<number> {
+  checkStopped();
   if (tabId !== null && (await tabExists(tabId))) {
     await chrome.tabs.update(tabId, { url });
     return tabId;

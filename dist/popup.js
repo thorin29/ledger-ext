@@ -88,10 +88,10 @@ var PROBLEMS = {
   ledger_error: { title: "Ledger couldn't save the orders", body: "It'll try again next sync.", action: "sync" },
   ledger_unreachable: { title: "Ledger can't be reached", body: "Check that it's running.", action: "sync" },
   reconnect: { title: "Reconnect to Ledger", body: "This extension was signed out.", action: "reconnect" },
-  tab_closed: { title: "Sync stopped", body: "The sync tab was closed. It'll try again next sync.", action: "sync" },
+  tab_closed: { title: "Sync stopped", body: "It'll try again next sync.", action: "sync" },
   amazon_error: { title: "Couldn't open Amazon", body: "It'll try again next sync.", action: "sync" }
 };
-var ACTION_LABEL = { amazon: "Open Amazon", outline: "Copy Page Outline", sync: "Sync Now", reconnect: "Reconnect" };
+var ACTION_LABEL = { amazon: "Open Amazon", outline: "Copy Page Outline", sync: "Sync Now", reconnect: "Reconnect", stop: "Stop Sync" };
 function when(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -135,10 +135,10 @@ async function render() {
     $("problem-title").textContent = unavailable ? "Amazon wouldn't show order details" : problem.title;
     $("problem-body").textContent = unavailable ? "It'll try again next sync." : problemKey === "parse_failed" && s.failedSection ? `${problem.body} \xB7 ${s.failedSection.replace(/_/g, " ")}` : problem.body;
   }
-  currentAction = problem?.action ?? "sync";
+  currentAction = running ? "stop" : problem?.action ?? "sync";
   $("main-action").classList.toggle("no-icon", currentAction !== "sync");
-  $("main-label").textContent = running && currentAction === "sync" ? "Syncing\u2026" : ACTION_LABEL[currentAction];
-  $("main-action").disabled = running && currentAction === "sync";
+  $("main-label").textContent = ACTION_LABEL[currentAction];
+  $("main-action").disabled = false;
   $("retry").hidden = currentAction === "sync" || running;
   $("split").textContent = String(s.chargesSplitThisMonth ?? 0);
   $("waiting").textContent = String(s.ordersWaiting ?? 0);
@@ -170,7 +170,7 @@ async function render() {
     })
   );
 }
-$("version").textContent = `v${"0.4.2"}`;
+$("version").textContent = `v${"0.4.3"}`;
 $("setup-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const err = $("setup-error");
@@ -207,6 +207,10 @@ $("main-action").addEventListener("click", async () => {
       return;
     case "outline":
       await copyOutline($("main-label"), ACTION_LABEL.outline);
+      return;
+    case "stop":
+      $("main-label").textContent = "Stopping\u2026";
+      await send({ type: "stop" });
       return;
     default:
       await send({ type: "sync" });

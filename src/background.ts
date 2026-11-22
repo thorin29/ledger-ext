@@ -5,7 +5,7 @@
  */
 
 import * as api from "./ledger/api";
-import { closeTab, readInTab, TabClosedError, type PageKind } from "./amazon/tab";
+import { checkStopped, closeTab, readInTab, resetTab, stopTab, TabClosedError, type PageKind } from "./amazon/tab";
 import { cachedCategory, clearFinished, forget, isFinished, load, markFinished, save, saveCategory } from "./storage";
 import { runSync, type Loaded } from "./sync";
 import type { ListPage, Section, SyncOrder, SyncStatus } from "./types";
@@ -38,7 +38,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   // An update may fix the last problem: clear it and sync a minute later.
   if (details.reason === "update") {
     await chrome.storage.local.remove(["lastStatus", "failedSection", "localProblem"]);
-    if ((await load()).token) await chrome.alarms.create("catch-up", { delayInMinutes: 1 });
+    const s = await load();
+    if (s.token && s.autoSync !== false) await chrome.alarms.create("catch-up", { delayInMinutes: 1 });
   }
 });
 chrome.runtime.onStartup.addListener(async () => {
@@ -50,8 +51,11 @@ chrome.runtime.onStartup.addListener(async () => {
     await chrome.alarms.create("catch-up", { delayInMinutes: 1 });
   }
 });
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === ALARM || alarm.name === "catch-up") void syncNow();
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== ALARM && alarm.name !== "catch-up") return;
+  // Automatic syncs only while "Sync automatically" is on.
+  if ((await load()).autoSync === false) return;
+  void syncNow();
 });
 
 // ---------- Amazon pages ----------
@@ -83,6 +87,7 @@ async function parse<T>(kind: "list" | "order" | "charges" | "category" | "outli
 let useTab = false;
 
 async function readAmazon(url: string, kind: PageKind): Promise<{ html: string; url: string }> {
+  checkStopped();
   if (useTab) return readInTab(url, kind);
   const page = await fetchAmazon(url);
   if ("blocked" in page) {
@@ -142,6 +147,7 @@ async function category(productId: string): Promise<{ ok: string | null } | { bl
   if (!/^[A-Z0-9]{10}$/.test(productId)) return { ok: null };
   const cached = await cachedCategory(productId);
   if (cached.hit) return { ok: cached.category };
+  checkStopped();
   await pause();
   const page = await fetchAmazon(`${AMAZON}/dp/${productId}`);
   if ("blocked" in page) return page;
@@ -178,6 +184,7 @@ export function syncNow(): Promise<void> {
     if (s.running && s.runStartedAt && Date.now() - Date.parse(s.runStartedAt) < STALE_RUN_MS) return;
     await save({ running: true, runStartedAt: new Date().toISOString() });
     useTab = false;
+    resetTab();
     try {
       const ledger = s.ledger;
       const token = await freshToken(ledger, s.token, s.tokenExpiresAt);
@@ -236,7 +243,8 @@ type Request =
   | { type: "disconnect" }
   | { type: "sync" }
   | { type: "auto"; on: boolean }
-  | { type: "outline" };
+  | { type: "outline" }
+  | { type: "stop" };
 
 async function handle(msg: Request): Promise<unknown> {
   switch (msg.type) {
@@ -259,6 +267,9 @@ async function handle(msg: Request): Promise<unknown> {
     case "sync":
       void syncNow();
       return { ok: true };
+    case "stop":
+      await stopTab();
+      return { ok: true };
     case "auto":
       await save({ autoSync: msg.on });
       await schedule();
@@ -267,6 +278,7 @@ async function handle(msg: Request): Promise<unknown> {
       // What the sync sees, every word masked: Your Orders, then the first order whose page
       // has no charge list (with its invoice), or else the first order.
       useTab = false;
+      resetTab();
       const outlineOf = async (page: { html: string; url: string }) => ((await parse("outline", page.html, page.url)) as { outline?: string }).outline ?? "";
       const readOrder = async (url: string, orderId: string) => {
         let page = await readAmazon(url, "order");

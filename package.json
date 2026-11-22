@@ -1,6 +1,6 @@
 {
   "name": "ledger-amazon",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "private": true,
   "description": "Chrome extension that sends your Amazon orders to your own Ledger server so Amazon charges split by item.",
   "type": "module",

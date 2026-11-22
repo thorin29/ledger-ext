@@ -163,6 +163,8 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
   const ids: string[] = [];
   const seen = new Set<string>();
   let pages = 0;
+  /** Undated orders that couldn't be opened in a row: without dates the walk can't know where to stop. */
+  let blind = 0;
   const thisYear = Number(deps.today().slice(0, 4));
   years: for (let year = thisYear; year >= Number(listFrom.slice(0, 4)); year--) {
     let url: string | null = deps.listUrl(year);
@@ -197,7 +199,11 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
         if (tried >= maxOrders || allFound()) break years;
         const read = await readOrder(o.orderId);
         if (typeof read === "string") return stopFor(read);
-        if (!read) continue;
+        if (!read) {
+          if (++blind >= 3) break years;
+          continue;
+        }
+        blind = 0;
         // Past the start: everything below it on the list is older still.
         if (read.orderDate < listFrom) break years;
         if (wanted(read.orderDate)) keep(read);
