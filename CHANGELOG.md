@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1]
+
+### Fixed
+- **Older charges on the Transactions page are loaded.** Amazon's Transactions page shows only
+  the latest charges and adds older ones as you scroll; there's no Next button. The sync now
+  scrolls (or clicks "See more" when there is one) until it reaches the oldest charge Ledger is
+  missing, instead of stopping after the first screen.
+
 ## [0.5.0]
 
 ### Changed

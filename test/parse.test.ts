@@ -111,6 +111,19 @@ describe("Your Payments transactions", () => {
   });
 });
 
+describe("Your Payments transactions, current layout", () => {
+  it("reads each row's own date, card digits, order and amount, leaving out refunds", () => {
+    const r = parseTransactions(page("transactions-current.html"));
+    expect(r.rows).toEqual([
+      { date: "2026-11-18", cents: 2541, last4: "0000", orderIds: ["111-0000000-0000007"] },
+      { date: "2026-11-18", cents: 487, last4: "0000", orderIds: ["111-0000000-0000007"] },
+      { date: "2026-11-16", cents: 1200, last4: null, orderIds: ["111-0000000-0000005"] },
+      { date: "2026-11-15", cents: 699, last4: "0000", orderIds: ["D01-0000000-0000001"] },
+    ]);
+    expect(r.hasNext).toBe(false);
+  });
+});
+
 describe("order list paging", () => {
   it("builds the next page from startIndex when a full page has no Next link", () => {
     const r = parseOrderList(page("orders-list-no-pager.html"), "https://www.amazon.com/your-orders/orders?timeFilter=year-2026&startIndex=10");

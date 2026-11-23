@@ -150,45 +150,57 @@ export async function closeTab(): Promise<void> {
   await chrome.tabs.remove(id).catch(() => undefined);
 }
 
-/** Runs inside the page: clicks the "Next page" button if there is one. */
-function clickNext(): boolean {
+/**
+ * Runs inside the page: shows more rows. Clicks a "Next page", "See more" or "Load more" button
+ * if there is one, else scrolls to the bottom (the Transactions page loads older charges as you
+ * scroll). Returns how much text the page has, to tell when something new arrived.
+ */
+function showMore(): number {
+  const buttons = [...document.querySelectorAll<HTMLElement>('a, button, span.a-button-text, input[type=submit], [role="button"]')];
   const byName = document.querySelector<HTMLElement>('input[name*="NextPage"], input[name*="nextPage"]');
-  const byText = [...document.querySelectorAll<HTMLElement>("a, button, span.a-button-text, input[type=submit]")].find((el) =>
-    /^next( page)?\s*(→|›)?$/i.test((el.textContent || (el as HTMLInputElement).value || "").trim()),
-  );
+  const byText = buttons.find((el) => /^(next( page)?|(see|show|load|view) more( transactions)?)\s*(→|›)?$/i.test((el.textContent || (el as HTMLInputElement).value || "").trim()));
   const target = byName ?? byText;
-  if (!target || target.closest(".a-button-disabled, .a-disabled, [aria-disabled='true']")) return false;
-  (target.closest("span.a-button")?.querySelector<HTMLElement>("input, a, button") ?? target).click();
-  return true;
+  if (target && !target.closest(".a-button-disabled, .a-disabled, [aria-disabled='true']")) {
+    (target.closest("span.a-button")?.querySelector<HTMLElement>("input, a, button") ?? target).click();
+  }
+  window.scrollTo(0, document.documentElement.scrollHeight);
+  document.querySelectorAll<HTMLElement>("*").forEach((el) => {
+    if (el.scrollHeight > el.clientHeight + 50 && /auto|scroll/.test(getComputedStyle(el).overflowY)) el.scrollTop = el.scrollHeight;
+  });
+  return (document.body?.innerText ?? "").length;
 }
 
-function fingerprint(): string {
-  return (document.body?.innerText ?? "").slice(0, 3000);
+function textSize(): number {
+  return (document.body?.innerText ?? "").length;
 }
 
 /**
- * Clicks "Next page" in the sync tab and waits until the page shows something new. Returns the
- * new page, or null when there's no next page.
+ * Shows more rows in the sync tab (a Next or "See more" button, or scrolling) and waits until
+ * the page has grown or changed. Returns the page, or null when nothing more came.
  */
-export async function nextPageInTab(kind: PageKind): Promise<{ html: string; url: string } | null> {
+export async function moreInTab(kind: PageKind): Promise<{ html: string; url: string } | null> {
   checkStopped();
   if (tabId === null) return null;
   const id = tabId;
-  const [before] = await chrome.scripting.executeScript({ target: { tabId: id }, func: fingerprint });
-  const [clicked] = await chrome.scripting.executeScript({ target: { tabId: id }, func: clickNext });
-  if (!clicked?.result) return null;
+  const [before] = await chrome.scripting.executeScript({ target: { tabId: id }, func: textSize });
+  const beforeSize = (before?.result as number) ?? 0;
+  await chrome.scripting.executeScript({ target: { tabId: id }, func: showMore });
   const started = Date.now();
   for (;;) {
     await new Promise((r) => setTimeout(r, POLL_MS));
     if (!(await tabExists(id))) throw new TabClosedError();
     try {
-      const [now] = await chrome.scripting.executeScript({ target: { tabId: id }, func: fingerprint });
-      const [frame] = await chrome.scripting.executeScript({ target: { tabId: id }, func: probe, args: [kind] });
-      const result = frame?.result as { ready: boolean; html: string; url: string } | undefined;
-      if (result && now?.result !== before?.result && result.ready) return { html: result.html, url: result.url };
+      const [size] = await chrome.scripting.executeScript({ target: { tabId: id }, func: textSize });
+      if ((size?.result as number) !== beforeSize) {
+        // Give the new rows a moment to finish drawing, then read the page.
+        await new Promise((r) => setTimeout(r, 800));
+        const [frame] = await chrome.scripting.executeScript({ target: { tabId: id }, func: probe, args: [kind] });
+        const result = frame?.result as { ready: boolean; html: string; url: string } | undefined;
+        if (result) return { html: result.html, url: result.url };
+      }
     } catch {
       // Mid-navigation: keep waiting.
     }
-    if (Date.now() - started > READY_TIMEOUT_MS) return null;
+    if (Date.now() - started > 10_000) return null;
   }
 }

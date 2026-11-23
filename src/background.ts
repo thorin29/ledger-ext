@@ -5,7 +5,7 @@
  */
 
 import * as api from "./ledger/api";
-import { checkStopped, closeTab, nextPageInTab, readInTab, resetTab, stopTab, TabClosedError, type PageKind } from "./amazon/tab";
+import { checkStopped, closeTab, moreInTab, readInTab, resetTab, stopTab, TabClosedError, type PageKind } from "./amazon/tab";
 import { TRANSACTIONS } from "./amazon/selectors";
 import { cachedCategory, clearFinished, forget, isFinished, load, markFinished, save, saveCategory } from "./storage";
 import { runSync, type Loaded } from "./sync";
@@ -142,7 +142,8 @@ async function loadOrder(orderId: string): Promise<Loaded<SyncOrder>> {
 }
 
 type TxPage = { rows: TxRow[]; hasNext: boolean };
-const MAX_TX_PAGES = 8;
+/** How many times to ask the Transactions page for older charges before giving up. */
+const MAX_TX_LOADS = 40;
 
 /**
  * Your Payments › Transactions back to `since`: a plain request first, the tab if that shows no
@@ -150,29 +151,36 @@ const MAX_TX_PAGES = 8;
  */
 async function loadTransactions(since: string): Promise<Loaded<TxRow[]>> {
   const rows = new Map<string, TxRow>();
-  const add = (list: TxRow[]) => list.forEach((r) => rows.set(`${r.date}|${r.cents}|${r.orderIds.join(",")}`, r));
-  const enough = (page: TxPage) => !page.hasNext || page.rows.some((r) => r.date < since);
+  const add = (list: TxRow[]) => list.forEach((r) => rows.set(`${r.date}|${r.cents}|${r.orderIds.join(",")}|${r.last4}`, r));
+  const reachedBack = () => [...rows.values()].some((r) => r.date < since);
 
   let page = await readAmazon(TRANSACTIONS.url, "transactions");
   let got = (await parse<TxPage>("transactions", page.html, page.url)) as Loaded<TxPage>;
   if ("blocked" in got) return got;
-  if (!useTab && (!("ok" in got) || !got.ok.rows.length || !enough(got.ok))) {
-    useTab = true;
-    page = await readInTab(TRANSACTIONS.url, "transactions");
-    got = (await parse<TxPage>("transactions", page.html, page.url)) as Loaded<TxPage>;
-    if ("blocked" in got) return got;
+  if ("ok" in got) add(got.ok.rows);
+  // Older charges only load in a real page (scrolling or a button), so use the tab for more.
+  if (!rows.size || !reachedBack()) {
+    if (!useTab) {
+      useTab = true;
+      page = await readInTab(TRANSACTIONS.url, "transactions");
+      got = (await parse<TxPage>("transactions", page.html, page.url)) as Loaded<TxPage>;
+      if ("blocked" in got) return got;
+      if ("ok" in got) add(got.ok.rows);
+    }
+    let stale = 0;
+    for (let n = 0; n < MAX_TX_LOADS && !reachedBack(); n++) {
+      const before = rows.size;
+      const more = await moreInTab("transactions");
+      if (more) {
+        const parsed = (await parse<TxPage>("transactions", more.html, more.url)) as Loaded<TxPage>;
+        if ("ok" in parsed) add(parsed.ok.rows);
+      }
+      // Two tries in a row with nothing new: that's all there is.
+      stale = rows.size === before ? stale + 1 : 0;
+      if (stale >= 2) break;
+    }
   }
-  if (!("ok" in got)) return { failed: "orders_list" };
-  add(got.ok.rows);
-  for (let n = 1; n < MAX_TX_PAGES && !enough(got.ok); n++) {
-    await pause();
-    const next = await nextPageInTab("transactions");
-    if (!next) break;
-    const more = (await parse<TxPage>("transactions", next.html, next.url)) as Loaded<TxPage>;
-    if (!("ok" in more)) break;
-    got = more;
-    add(more.ok.rows);
-  }
+  if (!rows.size && !("ok" in got)) return { failed: "orders_list" };
   return { ok: [...rows.values()] };
 }
 

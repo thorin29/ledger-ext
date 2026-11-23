@@ -196,38 +196,45 @@ async function closeTab() {
   tabId = null;
   await chrome.tabs.remove(id).catch(() => void 0);
 }
-function clickNext() {
+function showMore() {
+  const buttons = [...document.querySelectorAll('a, button, span.a-button-text, input[type=submit], [role="button"]')];
   const byName = document.querySelector('input[name*="NextPage"], input[name*="nextPage"]');
-  const byText = [...document.querySelectorAll("a, button, span.a-button-text, input[type=submit]")].find(
-    (el) => /^next( page)?\s*(→|›)?$/i.test((el.textContent || el.value || "").trim())
-  );
+  const byText = buttons.find((el) => /^(next( page)?|(see|show|load|view) more( transactions)?)\s*(→|›)?$/i.test((el.textContent || el.value || "").trim()));
   const target = byName ?? byText;
-  if (!target || target.closest(".a-button-disabled, .a-disabled, [aria-disabled='true']")) return false;
-  (target.closest("span.a-button")?.querySelector("input, a, button") ?? target).click();
-  return true;
+  if (target && !target.closest(".a-button-disabled, .a-disabled, [aria-disabled='true']")) {
+    (target.closest("span.a-button")?.querySelector("input, a, button") ?? target).click();
+  }
+  window.scrollTo(0, document.documentElement.scrollHeight);
+  document.querySelectorAll("*").forEach((el) => {
+    if (el.scrollHeight > el.clientHeight + 50 && /auto|scroll/.test(getComputedStyle(el).overflowY)) el.scrollTop = el.scrollHeight;
+  });
+  return (document.body?.innerText ?? "").length;
 }
-function fingerprint() {
-  return (document.body?.innerText ?? "").slice(0, 3e3);
+function textSize() {
+  return (document.body?.innerText ?? "").length;
 }
-async function nextPageInTab(kind) {
+async function moreInTab(kind) {
   checkStopped();
   if (tabId === null) return null;
   const id = tabId;
-  const [before] = await chrome.scripting.executeScript({ target: { tabId: id }, func: fingerprint });
-  const [clicked] = await chrome.scripting.executeScript({ target: { tabId: id }, func: clickNext });
-  if (!clicked?.result) return null;
+  const [before] = await chrome.scripting.executeScript({ target: { tabId: id }, func: textSize });
+  const beforeSize = before?.result ?? 0;
+  await chrome.scripting.executeScript({ target: { tabId: id }, func: showMore });
   const started = Date.now();
   for (; ; ) {
     await new Promise((r) => setTimeout(r, POLL_MS));
     if (!await tabExists(id)) throw new TabClosedError();
     try {
-      const [now] = await chrome.scripting.executeScript({ target: { tabId: id }, func: fingerprint });
-      const [frame] = await chrome.scripting.executeScript({ target: { tabId: id }, func: probe, args: [kind] });
-      const result = frame?.result;
-      if (result && now?.result !== before?.result && result.ready) return { html: result.html, url: result.url };
+      const [size] = await chrome.scripting.executeScript({ target: { tabId: id }, func: textSize });
+      if (size?.result !== beforeSize) {
+        await new Promise((r) => setTimeout(r, 800));
+        const [frame] = await chrome.scripting.executeScript({ target: { tabId: id }, func: probe, args: [kind] });
+        const result = frame?.result;
+        if (result) return { html: result.html, url: result.url };
+      }
     } catch {
     }
-    if (Date.now() - started > READY_TIMEOUT_MS) return null;
+    if (Date.now() - started > 1e4) return null;
   }
 }
 
@@ -555,7 +562,7 @@ async function runSync(deps, opts = {}) {
 }
 
 // src/background.ts
-var VERSION = "0.5.0";
+var VERSION = "0.5.1";
 var AMAZON = "https://www.amazon.com";
 var ALARM = "sync";
 var EVERY_MINUTES = 6 * 60;
@@ -649,31 +656,36 @@ async function loadOrder(orderId) {
   const charges = await parse("charges", invoice.html, invoice.url);
   return "ok" in charges ? { ok: { ...got.ok, charges: charges.ok } } : got;
 }
-var MAX_TX_PAGES = 8;
+var MAX_TX_LOADS = 40;
 async function loadTransactions(since) {
   const rows = /* @__PURE__ */ new Map();
-  const add = (list) => list.forEach((r) => rows.set(`${r.date}|${r.cents}|${r.orderIds.join(",")}`, r));
-  const enough = (page2) => !page2.hasNext || page2.rows.some((r) => r.date < since);
+  const add = (list) => list.forEach((r) => rows.set(`${r.date}|${r.cents}|${r.orderIds.join(",")}|${r.last4}`, r));
+  const reachedBack = () => [...rows.values()].some((r) => r.date < since);
   let page = await readAmazon(TRANSACTIONS.url, "transactions");
   let got = await parse("transactions", page.html, page.url);
   if ("blocked" in got) return got;
-  if (!useTab && (!("ok" in got) || !got.ok.rows.length || !enough(got.ok))) {
-    useTab = true;
-    page = await readInTab(TRANSACTIONS.url, "transactions");
-    got = await parse("transactions", page.html, page.url);
-    if ("blocked" in got) return got;
+  if ("ok" in got) add(got.ok.rows);
+  if (!rows.size || !reachedBack()) {
+    if (!useTab) {
+      useTab = true;
+      page = await readInTab(TRANSACTIONS.url, "transactions");
+      got = await parse("transactions", page.html, page.url);
+      if ("blocked" in got) return got;
+      if ("ok" in got) add(got.ok.rows);
+    }
+    let stale = 0;
+    for (let n = 0; n < MAX_TX_LOADS && !reachedBack(); n++) {
+      const before = rows.size;
+      const more = await moreInTab("transactions");
+      if (more) {
+        const parsed = await parse("transactions", more.html, more.url);
+        if ("ok" in parsed) add(parsed.ok.rows);
+      }
+      stale = rows.size === before ? stale + 1 : 0;
+      if (stale >= 2) break;
+    }
   }
-  if (!("ok" in got)) return { failed: "orders_list" };
-  add(got.ok.rows);
-  for (let n = 1; n < MAX_TX_PAGES && !enough(got.ok); n++) {
-    await pause();
-    const next = await nextPageInTab("transactions");
-    if (!next) break;
-    const more = await parse("transactions", next.html, next.url);
-    if (!("ok" in more)) break;
-    got = more;
-    add(more.ok.rows);
-  }
+  if (!rows.size && !("ok" in got)) return { failed: "orders_list" };
   return { ok: [...rows.values()] };
 }
 var listUrl = (year) => `${AMAZON}/your-orders/orders?timeFilter=year-${year}`;
