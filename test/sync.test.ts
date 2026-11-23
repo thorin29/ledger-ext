@@ -182,6 +182,36 @@ describe("runSync with Amazon's Transactions page", () => {
     expect(out.counts).toMatchObject({ unsplit: 3, found: 2, digital: 1, read: 1, noChargeList: 0 });
   });
 
+  it("takes a row with other card digits when it's the only one with that amount and date", async () => {
+    const { d } = deps({
+      unsplit: async () => [{ date: "2026-03-03", cents: 2541, last4: "0849" }],
+      loadTransactions: async () => ({ ok: rows }),
+      loadOrder: async (id) => ({ ok: { ...order(id, "2026-02-28"), charges: [] } }),
+    });
+    const out = await runSync(d);
+    expect(out.counts).toMatchObject({ found: 1, digitsDiffer: 1 });
+  });
+
+  it("sets aside a charge the page went back past without finding, and skips it next time", async () => {
+    const aside = new Set<string>();
+    const extra = {
+      setAsideKeys: async () => new Set(aside),
+      setAside: async (keys: string[]) => void keys.forEach((k) => aside.add(k)),
+    };
+    const { d } = deps({
+      unsplit: async () => [charge("2026-03-03", 2541), charge("2026-02-28", 4242), charge("2026-02-01", 5050)],
+      loadTransactions: async () => ({ ok: rows }),
+      loadOrder: async (id) => ({ ok: { ...order(id, "2026-02-28"), charges: [] } }),
+      ...extra,
+    });
+    const first = await runSync(d);
+    // Feb 28 was covered (the page reached Feb 20) but not found: set aside. Feb 1 wasn't reached.
+    expect([...aside]).toEqual(["2026-02-28|4242"]);
+    expect(first.counts.txBackTo).toBe("2026-02-20");
+    const second = await runSync(d);
+    expect(second.counts).toMatchObject({ unsplit: 2, setAside: 1 });
+  });
+
   it("falls back to Your Orders when the Transactions page shows nothing", async () => {
     const { d, loaded } = deps({ unsplit: async () => [charge("2026-03-01", 1083)], loadTransactions: async () => ({ ok: [] }) });
     await runSync(d);

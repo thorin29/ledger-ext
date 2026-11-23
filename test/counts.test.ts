@@ -11,6 +11,14 @@ describe("count lines", () => {
     ]);
   });
 
+  it("shows set-aside charges, other card digits and how far back the page loaded", () => {
+    const c = { ...emptyCounts(), unsplit: 6, found: 5, setAside: 2, digitsDiffer: 3, read: 4, split: 5, txBackTo: "2026-08-03" };
+    expect(countLines(c).slice(0, 2)).toEqual([
+      "Unsplit 6 · Found 5 · Still missing 1 · Set aside 2 · Other card digits 3",
+      "Transactions back to Aug 3 · Orders read 4",
+    ]);
+  });
+
   it("keeps it to one line when nothing is left", () => {
     expect(countLines({ ...emptyCounts(), unsplit: 0 })).toEqual(["Nothing left to split"]);
     expect(countLines(undefined)).toEqual([]);

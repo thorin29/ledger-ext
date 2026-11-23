@@ -43,7 +43,7 @@ export async function save(patch: Partial<Saved>): Promise<void> {
 
 /** Disconnect: forget the token and the sync history, keep the address and look. */
 export async function forget(): Promise<void> {
-  await chrome.storage.local.remove([...KEYS.filter((k) => k !== "ledger" && k !== "accent" && k !== "autoSync"), FINISHED, SALT]);
+  await chrome.storage.local.remove([...KEYS.filter((k) => k !== "ledger" && k !== "accent" && k !== "autoSync"), FINISHED, SALT, "setAside"]);
 }
 
 // ---------- Product categories (product data, not orders) ----------
@@ -111,4 +111,25 @@ export async function markFinished(orderIds: string[], now = Date.now()): Promis
 /** After Ledger's Amazon splits are removed, every order needs reading again. */
 export async function clearFinished(): Promise<void> {
   await chrome.storage.local.remove(FINISHED);
+}
+
+// ---------- Charges set aside (amount and date only) ----------
+
+const ASIDE = "setAside";
+const ASIDE_DAYS = 14;
+
+/** A charge Ledger can't get split because Amazon has no order for it: skipped for two weeks. */
+export async function setAsideKeys(now = Date.now()): Promise<Set<string>> {
+  const all = ((await chrome.storage.local.get(ASIDE))[ASIDE] ?? {}) as Record<string, number>;
+  const today = Math.floor(now / DAY);
+  return new Set(Object.entries(all).filter(([, t]) => today - t < ASIDE_DAYS).map(([k]) => k));
+}
+
+export async function setAside(keys: string[], now = Date.now()): Promise<void> {
+  if (!keys.length) return;
+  const all = ((await chrome.storage.local.get(ASIDE))[ASIDE] ?? {}) as Record<string, number>;
+  const today = Math.floor(now / DAY);
+  for (const k of keys) all[k] = today;
+  const kept = Object.entries(all).filter(([, t]) => today - t < ASIDE_DAYS);
+  await chrome.storage.local.set({ [ASIDE]: Object.fromEntries(kept) });
 }

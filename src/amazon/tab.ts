@@ -163,10 +163,24 @@ function showMore(): number {
   if (target && !target.closest(".a-button-disabled, .a-disabled, [aria-disabled='true']")) {
     (target.closest("span.a-button")?.querySelector<HTMLElement>("input, a, button") ?? target).click();
   }
+  // A background tab gets no scroll events from Chrome (it doesn't draw), so after scrolling,
+  // send the events a list listens for ourselves: scroll on the page and on each scrolled box.
+  const fire = (target: EventTarget) => {
+    target.dispatchEvent(new Event("scroll"));
+    target.dispatchEvent(new WheelEvent("wheel", { deltaY: 1200, bubbles: true }));
+  };
+  const last = [...document.querySelectorAll<HTMLElement>('a[role="link"], [role="listitem"], li')].pop();
+  last?.scrollIntoView({ block: "end" });
   window.scrollTo(0, document.documentElement.scrollHeight);
+  fire(window);
+  fire(document);
   document.querySelectorAll<HTMLElement>("*").forEach((el) => {
-    if (el.scrollHeight > el.clientHeight + 50 && /auto|scroll/.test(getComputedStyle(el).overflowY)) el.scrollTop = el.scrollHeight;
+    if (el.scrollHeight > el.clientHeight + 50 && /auto|scroll/.test(getComputedStyle(el).overflowY)) {
+      el.scrollTop = el.scrollHeight;
+      fire(el);
+    }
   });
+  window.dispatchEvent(new Event("resize"));
   return (document.body?.innerText ?? "").length;
 }
 

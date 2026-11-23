@@ -30,6 +30,9 @@ export interface SyncDeps {
   unsplit(): Promise<UnsplitCharge[] | null>;
   sendOrders(orders: SyncOrder[]): Promise<OrdersResult>;
   reportRun(status: SyncStatus, failedSection: Section | null, ordersWaiting: number): Promise<void>;
+  /** Charges set aside on earlier syncs (keys from chargeKey), and setting more aside. */
+  setAsideKeys?(): Promise<Set<string>>;
+  setAside?(keys: string[]): Promise<void>;
   /** Whether Amazon's pages had to be read in a tab this run. */
   usedTab(): boolean;
   /** Waits between Amazon pages so the sync stays gentle. */
@@ -75,8 +78,14 @@ export const sameCharge = (a: SyncCharge, b: UnsplitCharge) =>
 export const emptyCounts = (): RunCounts => ({
   listed: 0, finished: 0, read: 0, sent: 0, digital: 0, cancelled: 0, unreadable: 0,
   split: 0, waiting: 0, noMatch: 0, noChargeList: 0, items: 0, categorized: 0,
-  unsplit: 0, found: 0, usedTab: 0,
+  unsplit: 0, found: 0, usedTab: 0, digitsDiffer: 0, setAside: 0, txBackTo: null,
 });
+
+/** Amount and date only: what's kept to remember a charge that was set aside. */
+export const chargeKey = (c: UnsplitCharge) => `${c.date}|${c.cents}`;
+
+/** Same amount within a cent and within five days, ignoring the card. */
+const sameAmount = (a: SyncCharge, b: UnsplitCharge) => Math.abs(a.cents - b.cents) <= 1 && gap(a.date, b.date) <= 5;
 
 export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<SyncOutcome> {
   const maxOrders = opts.maxOrders ?? 150;
@@ -113,6 +122,13 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
   const stopFor = (b: Exclude<Blocked, null>) => finish(b === "signin" ? "amazon_signed_out" : "captcha", null);
 
   // What to look for: Ledger's unsplit charges (newer Ledger), or everything since its start day.
+  // Charges a full read couldn't find are set aside for a while, so they don't pull every sync back.
+  if (todoCharges && deps.setAsideKeys) {
+    const aside = await deps.setAsideKeys();
+    const before = todoCharges.length;
+    todoCharges = todoCharges.filter((c) => !aside.has(chargeKey(c)));
+    counts.setAside = before - todoCharges.length;
+  }
   counts.unsplit = todoCharges ? todoCharges.length : -1;
   if (todoCharges && !todoCharges.length) return finish("ok", null);
   const from = todoCharges
@@ -174,13 +190,31 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
       }
       const pool = tx.ok.filter((r) => r.orderIds.length);
       const needed: string[] = [];
+      const missing: UnsplitCharge[] = [];
       for (const u of todoCharges) {
-        const i = pool.findIndex((r) => sameCharge({ date: r.date, cents: r.cents, last4: r.last4 }, u));
-        if (i < 0) continue;
+        const asCharge = (r: TxRow) => ({ date: r.date, cents: r.cents, last4: r.last4 });
+        let i = pool.findIndex((r) => sameCharge(asCharge(r), u));
+        // Card digits are a hint: the digits Ledger has for a card often aren't Amazon's.
+        // Take a row with other digits only when it's the only one with that amount and date.
+        if (i < 0) {
+          const alike = pool.map((r, n) => [r, n] as const).filter(([r]) => sameAmount(asCharge(r), u));
+          if (alike.length === 1) {
+            i = alike[0]![1];
+            counts.digitsDiffer++;
+          }
+        }
+        if (i < 0) {
+          missing.push(u);
+          continue;
+        }
         counts.found++;
         for (const id of pool[i]!.orderIds) if (!needed.includes(id)) needed.push(id);
         pool.splice(i, 1);
       }
+      // Set aside what's missing although the page went back past its date.
+      const oldest = tx.ok.map((r) => r.date).sort()[0] ?? null;
+      counts.txBackTo = oldest;
+      if (oldest && deps.setAside) await deps.setAside(missing.filter((u) => shift(u.date, -5) >= oldest).map(chargeKey));
       for (const id of needed) {
         counts.listed++;
         if (id.startsWith("D")) {

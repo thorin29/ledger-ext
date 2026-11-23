@@ -204,10 +204,22 @@ function showMore() {
   if (target && !target.closest(".a-button-disabled, .a-disabled, [aria-disabled='true']")) {
     (target.closest("span.a-button")?.querySelector("input, a, button") ?? target).click();
   }
+  const fire = (target2) => {
+    target2.dispatchEvent(new Event("scroll"));
+    target2.dispatchEvent(new WheelEvent("wheel", { deltaY: 1200, bubbles: true }));
+  };
+  const last = [...document.querySelectorAll('a[role="link"], [role="listitem"], li')].pop();
+  last?.scrollIntoView({ block: "end" });
   window.scrollTo(0, document.documentElement.scrollHeight);
+  fire(window);
+  fire(document);
   document.querySelectorAll("*").forEach((el) => {
-    if (el.scrollHeight > el.clientHeight + 50 && /auto|scroll/.test(getComputedStyle(el).overflowY)) el.scrollTop = el.scrollHeight;
+    if (el.scrollHeight > el.clientHeight + 50 && /auto|scroll/.test(getComputedStyle(el).overflowY)) {
+      el.scrollTop = el.scrollHeight;
+      fire(el);
+    }
   });
+  window.dispatchEvent(new Event("resize"));
   return (document.body?.innerText ?? "").length;
 }
 function textSize() {
@@ -277,7 +289,7 @@ async function save(patch) {
   await chrome.storage.local.set(patch);
 }
 async function forget() {
-  await chrome.storage.local.remove([...KEYS.filter((k) => k !== "ledger" && k !== "accent" && k !== "autoSync"), FINISHED, SALT]);
+  await chrome.storage.local.remove([...KEYS.filter((k) => k !== "ledger" && k !== "accent" && k !== "autoSync"), FINISHED, SALT, "setAside"]);
 }
 var CATEGORIES = "categories";
 var DAY = 864e5;
@@ -329,6 +341,21 @@ async function markFinished(orderIds, now = Date.now()) {
 async function clearFinished() {
   await chrome.storage.local.remove(FINISHED);
 }
+var ASIDE = "setAside";
+var ASIDE_DAYS = 14;
+async function setAsideKeys(now = Date.now()) {
+  const all = (await chrome.storage.local.get(ASIDE))[ASIDE] ?? {};
+  const today = Math.floor(now / DAY);
+  return new Set(Object.entries(all).filter(([, t]) => today - t < ASIDE_DAYS).map(([k]) => k));
+}
+async function setAside(keys, now = Date.now()) {
+  if (!keys.length) return;
+  const all = (await chrome.storage.local.get(ASIDE))[ASIDE] ?? {};
+  const today = Math.floor(now / DAY);
+  for (const k of keys) all[k] = today;
+  const kept = Object.entries(all).filter(([, t]) => today - t < ASIDE_DAYS);
+  await chrome.storage.local.set({ [ASIDE]: Object.fromEntries(kept) });
+}
 
 // src/sync.ts
 var ORDER_LOOKBACK_DAYS = 30;
@@ -353,8 +380,13 @@ var emptyCounts = () => ({
   categorized: 0,
   unsplit: 0,
   found: 0,
-  usedTab: 0
+  usedTab: 0,
+  digitsDiffer: 0,
+  setAside: 0,
+  txBackTo: null
 });
+var chargeKey = (c) => `${c.date}|${c.cents}`;
+var sameAmount = (a, b) => Math.abs(a.cents - b.cents) <= 1 && gap(a.date, b.date) <= 5;
 async function runSync(deps, opts = {}) {
   const maxOrders = opts.maxOrders ?? 150;
   const maxListPages = opts.maxListPages ?? 40;
@@ -385,6 +417,12 @@ async function runSync(deps, opts = {}) {
     return out;
   };
   const stopFor = (b) => finish(b === "signin" ? "amazon_signed_out" : "captcha", null);
+  if (todoCharges && deps.setAsideKeys) {
+    const aside = await deps.setAsideKeys();
+    const before = todoCharges.length;
+    todoCharges = todoCharges.filter((c) => !aside.has(chargeKey(c)));
+    counts.setAside = before - todoCharges.length;
+  }
   counts.unsplit = todoCharges ? todoCharges.length : -1;
   if (todoCharges && !todoCharges.length) return finish("ok", null);
   const from = todoCharges ? todoCharges.map((c) => c.date).sort()[0] : [st.syncFrom, opts.waitingSince].filter((d) => !!d).sort()[0];
@@ -437,13 +475,28 @@ async function runSync(deps, opts = {}) {
       }
       const pool = tx.ok.filter((r) => r.orderIds.length);
       const needed = [];
+      const missing = [];
       for (const u of todoCharges) {
-        const i = pool.findIndex((r) => sameCharge({ date: r.date, cents: r.cents, last4: r.last4 }, u));
-        if (i < 0) continue;
+        const asCharge = (r) => ({ date: r.date, cents: r.cents, last4: r.last4 });
+        let i = pool.findIndex((r) => sameCharge(asCharge(r), u));
+        if (i < 0) {
+          const alike = pool.map((r, n) => [r, n]).filter(([r]) => sameAmount(asCharge(r), u));
+          if (alike.length === 1) {
+            i = alike[0][1];
+            counts.digitsDiffer++;
+          }
+        }
+        if (i < 0) {
+          missing.push(u);
+          continue;
+        }
         counts.found++;
         for (const id of pool[i].orderIds) if (!needed.includes(id)) needed.push(id);
         pool.splice(i, 1);
       }
+      const oldest = tx.ok.map((r) => r.date).sort()[0] ?? null;
+      counts.txBackTo = oldest;
+      if (oldest && deps.setAside) await deps.setAside(missing.filter((u) => shift(u.date, -5) >= oldest).map(chargeKey));
       for (const id of needed) {
         counts.listed++;
         if (id.startsWith("D")) {
@@ -562,7 +615,7 @@ async function runSync(deps, opts = {}) {
 }
 
 // src/background.ts
-var VERSION = "0.5.1";
+var VERSION = "0.5.2";
 var AMAZON = "https://www.amazon.com";
 var ALARM = "sync";
 var EVERY_MINUTES = 6 * 60;
@@ -741,6 +794,8 @@ function syncNow() {
           clearFinished,
           status: () => status(ledger, token),
           unsplit: () => unsplit(ledger, token),
+          setAsideKeys: () => setAsideKeys(),
+          setAside: (keys) => setAside(keys),
           usedTab: () => useTab,
           sendOrders: (orders) => sendOrders(ledger, token, orders, crypto.randomUUID()),
           reportRun: async (status2, section, waiting) => {

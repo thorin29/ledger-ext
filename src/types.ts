@@ -60,6 +60,12 @@ export interface RunCounts {
   found: number;
   /** 1 when Amazon only showed its pages in a tab. */
   usedTab: number;
+  /** Found, but on a card showing other digits than Ledger has (taken because it was the only match). */
+  digitsDiffer: number;
+  /** Charges not found after a full read of their dates, skipped for a while so syncs stay short. */
+  setAside: number;
+  /** How far back the Transactions page loaded (YYYY-MM-DD). */
+  txBackTo?: string | null;
 }
 
 /** An Amazon charge Ledger hasn't split yet. */

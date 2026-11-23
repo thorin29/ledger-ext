@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.2]
+
+Works best with Ledger 0.112.0.
+
+### Fixed
+- **Older charges load in the background tab.** Chrome doesn't send scroll events to a tab you're
+  not looking at, so Amazon's Transactions page never loaded older charges. The sync now sends
+  them itself after scrolling.
+- **Card digits are a hint, not a rule.** The digits Ledger has for a card often aren't the ones
+  Amazon shows. A charge with the same amount and date on a card with other digits is taken when
+  it's the only one ("Other card digits" in the counts).
+- **Charges that can't be found stop pulling every sync back.** One that's still missing after
+  the Transactions page went back past its date is set aside for two weeks ("Set aside").
+
+### Added
+- "Transactions back to …" in the counts: how far back Amazon's Transactions page loaded.
+
 ## [0.5.1]
 
 ### Fixed

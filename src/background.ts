@@ -7,7 +7,7 @@
 import * as api from "./ledger/api";
 import { checkStopped, closeTab, moreInTab, readInTab, resetTab, stopTab, TabClosedError, type PageKind } from "./amazon/tab";
 import { TRANSACTIONS } from "./amazon/selectors";
-import { cachedCategory, clearFinished, forget, isFinished, load, markFinished, save, saveCategory } from "./storage";
+import { cachedCategory, clearFinished, forget, isFinished, load, markFinished, save, saveCategory, setAside, setAsideKeys } from "./storage";
 import { runSync, type Loaded } from "./sync";
 import type { ListPage, Section, SyncOrder, SyncStatus, TxRow } from "./types";
 
@@ -244,6 +244,8 @@ export function syncNow(): Promise<void> {
           clearFinished,
           status: () => api.status(ledger, token),
           unsplit: () => api.unsplit(ledger, token),
+          setAsideKeys: () => setAsideKeys(),
+          setAside: (keys) => setAside(keys),
           usedTab: () => useTab,
           sendOrders: (orders) => api.sendOrders(ledger, token, orders, crypto.randomUUID()),
           reportRun: async (status: SyncStatus, section: Section | null, waiting: number) => {
