@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.3]
+
+### Fixed
+- **Amazon's "click to continue" checkpoint stops the sync.** It wasn't recognized, so syncs kept
+  going behind it. It now shows "Amazon wants a quick check" with Open Amazon.
+
+### Changed
+- **Gentler on Amazon:** 3 to 6 seconds between pages, at most 25 orders and 15 new product pages
+  per sync, and at most 15 loads of older transactions. Anything left is picked up next sync.
+
 ## [0.5.2]
 
 Works best with Ledger 0.112.0.

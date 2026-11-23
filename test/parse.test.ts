@@ -148,6 +148,7 @@ describe("blocked pages", () => {
     expect(blocked(page("signin.html"), "https://www.amazon.com/ap/signin?x=1")).toBe("signin");
     expect(blocked(page("signin.html"), "https://www.amazon.com/your-orders/orders")).toBe("signin");
     expect(blocked(page("captcha.html"), "https://www.amazon.com/your-orders/orders")).toBe("captcha");
+    expect(blocked(page("checkpoint.html"), "https://www.amazon.com/cpe/yourpayments/transactions")).toBe("captcha");
     expect(blocked(page("orders-list.html"), BASE)).toBeNull();
   });
 });

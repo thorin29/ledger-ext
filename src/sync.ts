@@ -46,6 +46,8 @@ export interface SyncOptions {
   /** Ledger's start day on the last sync. */
   previousLedgerFrom?: string | null;
   maxOrders?: number;
+  /** New product pages read per sync (cached ones don't count). */
+  maxCategoryLookups?: number;
   maxListPages?: number;
   batchSize?: number;
 }
@@ -88,7 +90,8 @@ export const chargeKey = (c: UnsplitCharge) => `${c.date}|${c.cents}`;
 const sameAmount = (a: SyncCharge, b: UnsplitCharge) => Math.abs(a.cents - b.cents) <= 1 && gap(a.date, b.date) <= 5;
 
 export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<SyncOutcome> {
-  const maxOrders = opts.maxOrders ?? 150;
+  // Kept small so a sync looks like a person checking a few orders, not a crawler.
+  const maxOrders = opts.maxOrders ?? 25;
   const maxListPages = opts.maxListPages ?? 40;
   const batchSize = opts.batchSize ?? 20;
   const counts = emptyCounts();
@@ -313,12 +316,16 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
     return finish("parse_failed", worst);
   }
 
-  // 3. Amazon's category for each product, one page per product not seen before.
+  // 3. Amazon's category for each product, one page per product not seen before (a few per sync;
+  // the rest are looked up next time, so their items go by name for now).
   const asked = new Map<string, string | null>();
+  let lookups = 0;
   for (const it of orders.flatMap((o) => o.items)) {
     counts.items++;
     if (!it.productId) continue;
     if (!asked.has(it.productId)) {
+      if (lookups >= (opts.maxCategoryLookups ?? 15)) continue;
+      lookups++;
       const c = await deps.category(it.productId);
       if ("blocked" in c) return stopFor(c.blocked);
       asked.set(it.productId, c.ok);

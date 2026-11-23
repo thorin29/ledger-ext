@@ -51,7 +51,7 @@ function probe(kind: PageKind): { ready: boolean; html: string; url: string } {
   const has = (s: string) => !!d.querySelector(s);
   const text = d.body?.innerText ?? "";
   let ready = d.readyState === "complete";
-  if (has('form[name="signIn"], #ap_email, #ap_password, #captchacharacters')) ready = true;
+  if (has('form[name="signIn"], #ap_email, #ap_password, #captchacharacters, #tmms-challenge, form#checkpointForm')) ready = true;
   else if (kind === "list") {
     // Every order box unlocked (has content), or no orders this year.
     const locked = [...d.querySelectorAll(".csd-encrypted-sensitive")].filter((el) => !el.children.length && !(el.textContent ?? "").trim());

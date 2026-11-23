@@ -107,7 +107,7 @@ function probe(kind) {
   const has = (s) => !!d.querySelector(s);
   const text = d.body?.innerText ?? "";
   let ready = d.readyState === "complete";
-  if (has('form[name="signIn"], #ap_email, #ap_password, #captchacharacters')) ready = true;
+  if (has('form[name="signIn"], #ap_email, #ap_password, #captchacharacters, #tmms-challenge, form#checkpointForm')) ready = true;
   else if (kind === "list") {
     const locked = [...d.querySelectorAll(".csd-encrypted-sensitive")].filter((el) => !el.children.length && !(el.textContent ?? "").trim());
     const cards = d.querySelectorAll(".order-card, .js-order-card").length;
@@ -388,7 +388,7 @@ var emptyCounts = () => ({
 var chargeKey = (c) => `${c.date}|${c.cents}`;
 var sameAmount = (a, b) => Math.abs(a.cents - b.cents) <= 1 && gap(a.date, b.date) <= 5;
 async function runSync(deps, opts = {}) {
-  const maxOrders = opts.maxOrders ?? 150;
+  const maxOrders = opts.maxOrders ?? 25;
   const maxListPages = opts.maxListPages ?? 40;
   const batchSize = opts.batchSize ?? 20;
   const counts = emptyCounts();
@@ -583,10 +583,13 @@ async function runSync(deps, opts = {}) {
     return finish("parse_failed", worst);
   }
   const asked = /* @__PURE__ */ new Map();
+  let lookups = 0;
   for (const it of orders.flatMap((o) => o.items)) {
     counts.items++;
     if (!it.productId) continue;
     if (!asked.has(it.productId)) {
+      if (lookups >= (opts.maxCategoryLookups ?? 15)) continue;
+      lookups++;
       const c = await deps.category(it.productId);
       if ("blocked" in c) return stopFor(c.blocked);
       asked.set(it.productId, c.ok);
@@ -615,7 +618,7 @@ async function runSync(deps, opts = {}) {
 }
 
 // src/background.ts
-var VERSION = "0.5.2";
+var VERSION = "0.5.3";
 var AMAZON = "https://www.amazon.com";
 var ALARM = "sync";
 var EVERY_MINUTES = 6 * 60;
@@ -685,7 +688,7 @@ async function fetchAmazon(url) {
   if (res.status === 503) return { blocked: "captcha" };
   return { html: await res.text(), url: res.url || url, status: res.status };
 }
-var pause = () => new Promise((r) => setTimeout(r, 1500 + Math.random() * 1500));
+var pause = () => new Promise((r) => setTimeout(r, 3e3 + Math.random() * 3e3));
 async function loadList(url) {
   const page = await readAmazon(url, "list");
   const got = await parse("list", page.html, page.url);
@@ -709,7 +712,7 @@ async function loadOrder(orderId) {
   const charges = await parse("charges", invoice.html, invoice.url);
   return "ok" in charges ? { ok: { ...got.ok, charges: charges.ok } } : got;
 }
-var MAX_TX_LOADS = 40;
+var MAX_TX_LOADS = 15;
 async function loadTransactions(since) {
   const rows = /* @__PURE__ */ new Map();
   const add = (list) => list.forEach((r) => rows.set(`${r.date}|${r.cents}|${r.orderIds.join(",")}|${r.last4}`, r));

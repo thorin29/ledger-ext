@@ -113,7 +113,8 @@ async function fetchAmazon(url: string): Promise<{ html: string; url: string; st
   return { html: await res.text(), url: res.url || url, status: res.status };
 }
 
-const pause = () => new Promise<void>((r) => setTimeout(r, 1500 + Math.random() * 1500));
+/** A person-like pace between Amazon pages: 3 to 6 seconds. */
+const pause = () => new Promise<void>((r) => setTimeout(r, 3000 + Math.random() * 3000));
 
 async function loadList(url: string): Promise<Loaded<ListPage>> {
   const page = await readAmazon(url, "list");
@@ -143,7 +144,7 @@ async function loadOrder(orderId: string): Promise<Loaded<SyncOrder>> {
 
 type TxPage = { rows: TxRow[]; hasNext: boolean };
 /** How many times to ask the Transactions page for older charges before giving up. */
-const MAX_TX_LOADS = 40;
+const MAX_TX_LOADS = 15;
 
 /**
  * Your Payments › Transactions back to `since`: a plain request first, the tab if that shows no

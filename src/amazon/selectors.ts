@@ -71,7 +71,8 @@ export const BLOCKED = {
   signinUrl: /\/ap\/(?:signin|mfa|cvf)|\/ax\/claim/,
   signin: ['form[name="signIn"]', "#ap_email", "#ap_password", 'form[action*="/ap/signin"]'],
   captchaUrl: /validateCaptcha|\/errors\/|captcha/i,
-  captcha: ['form[action*="validateCaptcha"]', "#captchacharacters", 'img[src*="captcha"]'],
+  /** Amazon's robot checks: the old type-the-letters page and the newer "click to continue" checkpoint. */
+  captcha: ['form[action*="validateCaptcha"]', "#captchacharacters", 'img[src*="captcha"]', "#tmms-challenge", "form#checkpointForm", "#continueCheck"],
   captchaText: /enter the characters you see|type the characters|solve this puzzle|verify (?:that )?you(?:'re| are) (?:a )?human/i,
 };
 

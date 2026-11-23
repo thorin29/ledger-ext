@@ -180,7 +180,7 @@ async function render() {
     })
   );
 }
-$("version").textContent = `v${"0.5.2"}`;
+$("version").textContent = `v${"0.5.3"}`;
 $("setup-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const err = $("setup-error");
