@@ -17,15 +17,15 @@ var DETAILS = {
   orderDate: ['[data-component="orderDate"]', ".order-date-invoice-item", "#orderDetails .a-span3 .a-color-secondary"],
   orderDateText: /(?:ordered on|order placed)\s*:?\s*/i,
   /** One box per shipment. */
-  shipment: ['[data-component="shipments"] > div', '[data-component="shipments"] .a-box', ".shipment", "#od-subtotals ~ .a-box"],
+  shipment: ['[data-component="shipments"] .a-box-group > .a-box', '[data-component="shipments"] > .a-box', '[data-component="shipments"] > div', ".shipment"],
   shipmentDateText: /(?:shipped|delivered|arriving|now arriving|expected)\b/i,
   /** One block per item. */
-  item: ['[data-component="purchasedItems"] > div', '[data-component="purchasedItems"] .a-fixed-left-grid', ".yohtmlc-item", ".a-fixed-left-grid.item-box"],
+  item: ['[data-component="purchasedItems"] .a-fixed-left-grid', ".yohtmlc-item", ".a-fixed-left-grid.item-box", '[data-component="purchasedItems"] > div'],
   itemTitle: ['[data-component="itemTitle"]', ".yohtmlc-product-title", 'a.a-link-normal[href*="/dp/"]', 'a[href*="/dp/"]', 'a[href*="/gp/product/"]'],
   itemPrice: ['[data-component="unitPrice"] .a-offscreen', '[data-component="unitPrice"]', ".a-color-price", ".yohtmlc-item .a-price .a-offscreen"],
   /** The product id (ASIN) in an item's link. */
   productLink: /\/(?:dp|gp\/product|gp\/aw\/d)\/([A-Z0-9]{10})(?:[/?#]|$)/,
-  itemQuantity: [".od-item-view-qty", ".item-view-qty", '[data-component="quantity"]'],
+  itemQuantity: ['[data-component="quantity"]', ".product-image__qty", ".od-item-view-qty", ".item-view-qty"],
   quantityText: /(?:qty|quantity)\s*:?\s*(\d{1,3})/i,
   /** "November 19, 2026 - Visa ending in 0000: $25.41" (order page). */
   chargeOnOrder: /([A-Z][a-z]{2,8}\.? \d{1,2}, \d{4})\s*[-–:]\s*[^\n]{0,60}?ending in\s*(\d{4})\s*:\s*(\$\s*[\d,]+\.\d{2})/i,
@@ -35,6 +35,15 @@ var DETAILS = {
   /** "We're unable to load your order details": Amazon refused this page for now. */
   unavailable: ['[data-component="errorbanner"] .a-alert-heading', "#orderDetails .a-alert-error .a-alert-heading"],
   cancelledText: /this order (?:has been|was) cancel|order cancell?ed/i
+};
+var TRANSACTIONS = {
+  url: "https://www.amazon.com/cpe/yourpayments/transactions",
+  /** The "Next page" button (a form submit). */
+  next: ['input[name*="NextPage"]', 'span.a-button input[name*="nextPage" i]', ".a-pagination .a-last a[href]"],
+  nextText: /^next( page)?\s*(→|›)?$/i,
+  last4: /(?:\*{2,}|•{2,}|·{2,}|ending in\s*)\s*(\d{4})/i,
+  amount: /([+\-−–]?)\s*\$\s*([\d,]+\.\d{2})/,
+  refund: /refund|\+\s*\$/i
 };
 var PRODUCT = {
   /** The category trail above the product title: "Grocery & Gourmet Food › Produce › Potatoes". */
@@ -346,6 +355,43 @@ function outline(doc) {
   if (doc.body) walk(doc.body, 0);
   return lines.join("\n");
 }
+function parseTransactions(doc) {
+  const root = doc.body ?? doc.documentElement;
+  const rows = [];
+  const done = /* @__PURE__ */ new Set();
+  let day = null;
+  const walker = doc.createTreeWalker(
+    root,
+    4
+    /* NodeFilter.SHOW_TEXT */
+  );
+  const amountsIn = (text) => text.match(new RegExp(TRANSACTIONS.amount.source, "g")) ?? [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const text = clean(node.nodeValue);
+    if (!text) continue;
+    const parent = node.parentElement;
+    if (parent && /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(parent.tagName)) continue;
+    if (text.length <= 30 && fullDate(text) && !ORDER_ID.test(text) && !/\$/.test(text)) {
+      day = fullDate(text);
+      continue;
+    }
+    if (!ORDER_ID.test(text) || !day || !parent) continue;
+    let row = parent;
+    while (row && amountsIn(row.textContent ?? "").length === 0) row = row.parentElement;
+    if (!row || done.has(row) || amountsIn(row.textContent ?? "").length !== 1) continue;
+    done.add(row);
+    const rowText = clean(row.textContent);
+    if (TRANSACTIONS.refund.test(rowText)) continue;
+    const m = TRANSACTIONS.amount.exec(rowText);
+    if (!m || m[1] === "+") continue;
+    const cents2 = Math.round(Number(m[2].replace(/,/g, "")) * 100);
+    const orderIds = [...new Set(rowText.match(new RegExp(ORDER_ID.source, "g")) ?? [])];
+    rows.push({ date: day, cents: cents2, last4: TRANSACTIONS.last4.exec(rowText)?.[1] ?? null, orderIds });
+  }
+  const nextButton = first(doc, TRANSACTIONS.next) ?? [...doc.querySelectorAll("a, button, span.a-button-text")].find((el) => TRANSACTIONS.nextText.test(clean(el.textContent)));
+  const disabled = nextButton?.closest(".a-button-disabled, .a-disabled, [aria-disabled='true']") || nextButton?.hasAttribute("disabled");
+  return { rows, hasNext: !!nextButton && !disabled };
+}
 
 // src/offscreen.ts
 function handle(msg) {
@@ -361,6 +407,8 @@ function handle(msg) {
         return { ok: parseOrderDetails(doc, msg.orderId ?? "") };
       case "charges":
         return { ok: chargesIn(doc) };
+      case "transactions":
+        return { ok: parseTransactions(doc) };
       case "category":
         return { ok: parseProductCategory(doc) };
       case "outline":

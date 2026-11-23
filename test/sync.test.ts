@@ -154,6 +154,41 @@ describe("runSync with Ledger's unsplit charges", () => {
   });
 });
 
+describe("runSync with Amazon's Transactions page", () => {
+  const charge = (date: string, cents: number) => ({ date, cents, last4: "0000" });
+  const rows = [
+    { date: "2026-03-02", cents: 2541, last4: "0000", orderIds: ["111-0000000-0000007"] },
+    { date: "2026-03-02", cents: 487, last4: "0000", orderIds: ["111-0000000-0000007"] },
+    { date: "2026-03-01", cents: 999, last4: "0000", orderIds: ["D01-0000000-0000001"] },
+    { date: "2026-02-20", cents: 1500, last4: "0000", orderIds: ["111-0000000-0000003"] },
+  ];
+
+  it("opens only the orders that hold the missing charges, with their charges from that page", async () => {
+    const loaded: string[] = [];
+    const { d, sent } = deps({
+      unsplit: async () => [charge("2026-03-03", 2541), charge("2026-03-01", 999), charge("2026-03-05", 777)],
+      loadTransactions: async () => ({ ok: rows }),
+      loadList: async () => {
+        throw new Error("Your Orders isn't needed");
+      },
+      loadOrder: async (id) => {
+        loaded.push(id);
+        return { ok: { ...order(id, "2026-02-28"), charges: [] } };
+      },
+    });
+    const out = await runSync(d);
+    expect(loaded).toEqual(["111-0000000-0000007"]);
+    expect(sent[0]![0]!.charges).toEqual([charge("2026-03-02", 2541), charge("2026-03-02", 487)]);
+    expect(out.counts).toMatchObject({ unsplit: 3, found: 2, digital: 1, read: 1, noChargeList: 0 });
+  });
+
+  it("falls back to Your Orders when the Transactions page shows nothing", async () => {
+    const { d, loaded } = deps({ unsplit: async () => [charge("2026-03-01", 1083)], loadTransactions: async () => ({ ok: [] }) });
+    await runSync(d);
+    expect(loaded.length).toBeGreaterThan(0);
+  });
+});
+
 describe("runSync", () => {
   it("reads orders placed up to 30 days before the start day, oldest first, and skips digital ones", async () => {
     const { d, loaded, reports } = deps();

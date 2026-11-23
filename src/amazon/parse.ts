@@ -4,9 +4,9 @@
  * nothing is kept. Page scripts never run: DOMParser doesn't execute them.
  */
 
-import { BLOCKED, DETAILS, LIST, OUTLINE_WORDS, PRODUCT } from "./selectors";
+import { BLOCKED, DETAILS, LIST, OUTLINE_WORDS, PRODUCT, TRANSACTIONS } from "./selectors";
 import { cents, clean, fullDate, ORDER_ID, shortDate } from "./text";
-import type { Blocked, ListPage, Section, SyncCharge, SyncItem, SyncOrder } from "../types";
+import type { Blocked, ListPage, Section, SyncCharge, SyncItem, SyncOrder, TxRow } from "../types";
 
 export class ParseError extends Error {
   constructor(readonly section: Section) {
@@ -251,4 +251,45 @@ export function outline(doc: Document): string {
   };
   if (doc.body) walk(doc.body, 0);
   return lines.join("\n");
+}
+
+/**
+ * Your Payments › Transactions: each charge with its date, amount, card's last 4 and the order
+ * numbers it paid for. Refunds and rows without an order number are left out. Read by text: a
+ * line that is only a date starts a day; a row is the smallest box holding an order number and
+ * exactly one dollar amount.
+ */
+export function parseTransactions(doc: Document): { rows: TxRow[]; hasNext: boolean } {
+  const root = doc.body ?? doc.documentElement;
+  const rows: TxRow[] = [];
+  const done = new Set<Element>();
+  let day: string | null = null;
+  const walker = doc.createTreeWalker(root, 4 /* NodeFilter.SHOW_TEXT */);
+  const amountsIn = (text: string) => text.match(new RegExp(TRANSACTIONS.amount.source, "g")) ?? [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const text = clean(node.nodeValue);
+    if (!text) continue;
+    const parent = node.parentElement;
+    if (parent && /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(parent.tagName)) continue;
+    if (text.length <= 30 && fullDate(text) && !ORDER_ID.test(text) && !/\$/.test(text)) {
+      day = fullDate(text);
+      continue;
+    }
+    if (!ORDER_ID.test(text) || !day || !parent) continue;
+    // The row: climb until the box has a dollar amount, stopping before it holds two.
+    let row: Element | null = parent;
+    while (row && amountsIn(row.textContent ?? "").length === 0) row = row.parentElement;
+    if (!row || done.has(row) || amountsIn(row.textContent ?? "").length !== 1) continue;
+    done.add(row);
+    const rowText = clean(row.textContent);
+    if (TRANSACTIONS.refund.test(rowText)) continue;
+    const m = TRANSACTIONS.amount.exec(rowText);
+    if (!m || m[1] === "+") continue;
+    const cents = Math.round(Number(m[2]!.replace(/,/g, "")) * 100);
+    const orderIds = [...new Set((rowText.match(new RegExp(ORDER_ID.source, "g")) ?? []))];
+    rows.push({ date: day, cents, last4: TRANSACTIONS.last4.exec(rowText)?.[1] ?? null, orderIds });
+  }
+  const nextButton = first(doc, TRANSACTIONS.next) ?? [...doc.querySelectorAll("a, button, span.a-button-text")].find((el) => TRANSACTIONS.nextText.test(clean(el.textContent)));
+  const disabled = nextButton?.closest(".a-button-disabled, .a-disabled, [aria-disabled='true']") || nextButton?.hasAttribute("disabled");
+  return { rows, hasNext: !!nextButton && !disabled };
 }

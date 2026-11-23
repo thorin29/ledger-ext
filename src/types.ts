@@ -75,3 +75,11 @@ export interface ListPage {
 }
 
 export type Blocked = "signin" | "captcha" | null;
+
+/** One charge on Amazon's Your Payments › Transactions page. */
+export interface TxRow {
+  date: string;
+  cents: number;
+  last4: string | null;
+  orderIds: string[];
+}

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0]
+
+### Changed
+- **Charges come from Your Payments › Transactions.** Amazon's order pages and invoices no longer
+  list an order's card charges (they're behind "View related transactions"). The sync now reads
+  Amazon's Transactions page, finds each charge Ledger hasn't split by amount, date and card, and
+  opens only the orders those charges name. Your Orders is only walked if that page shows nothing.
+- **Copy Page Outline** includes the Transactions page.
+
+### Fixed
+- Every item in a shipment is read on Amazon's current order page; before, only the first item of
+  each shipment was.
+- Shipments on the current order page are told apart.
+
 ## [0.4.3]
 
 ### Fixed

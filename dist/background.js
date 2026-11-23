@@ -112,6 +112,8 @@ function probe(kind) {
     const locked = [...d.querySelectorAll(".csd-encrypted-sensitive")].filter((el) => !el.children.length && !(el.textContent ?? "").trim());
     const cards = d.querySelectorAll(".order-card, .js-order-card").length;
     ready = ready && (cards > 0 && locked.length === 0 || /0 orders placed|haven't placed|have not placed/i.test(text));
+  } else if (kind === "transactions") {
+    ready = ready && (/Order #|no transactions|you have no/i.test(text) || has("form[name*='signIn']"));
   } else if (kind === "order") {
     ready = ready && (has('[data-component="purchasedItems"], .yohtmlc-item, [data-component="orderDate"], [data-component="errorbanner"]') || /ordered on|order placed/i.test(text));
   }
@@ -194,6 +196,51 @@ async function closeTab() {
   tabId = null;
   await chrome.tabs.remove(id).catch(() => void 0);
 }
+function clickNext() {
+  const byName = document.querySelector('input[name*="NextPage"], input[name*="nextPage"]');
+  const byText = [...document.querySelectorAll("a, button, span.a-button-text, input[type=submit]")].find(
+    (el) => /^next( page)?\s*(→|›)?$/i.test((el.textContent || el.value || "").trim())
+  );
+  const target = byName ?? byText;
+  if (!target || target.closest(".a-button-disabled, .a-disabled, [aria-disabled='true']")) return false;
+  (target.closest("span.a-button")?.querySelector("input, a, button") ?? target).click();
+  return true;
+}
+function fingerprint() {
+  return (document.body?.innerText ?? "").slice(0, 3e3);
+}
+async function nextPageInTab(kind) {
+  checkStopped();
+  if (tabId === null) return null;
+  const id = tabId;
+  const [before] = await chrome.scripting.executeScript({ target: { tabId: id }, func: fingerprint });
+  const [clicked] = await chrome.scripting.executeScript({ target: { tabId: id }, func: clickNext });
+  if (!clicked?.result) return null;
+  const started = Date.now();
+  for (; ; ) {
+    await new Promise((r) => setTimeout(r, POLL_MS));
+    if (!await tabExists(id)) throw new TabClosedError();
+    try {
+      const [now] = await chrome.scripting.executeScript({ target: { tabId: id }, func: fingerprint });
+      const [frame] = await chrome.scripting.executeScript({ target: { tabId: id }, func: probe, args: [kind] });
+      const result = frame?.result;
+      if (result && now?.result !== before?.result && result.ready) return { html: result.html, url: result.url };
+    } catch {
+    }
+    if (Date.now() - started > READY_TIMEOUT_MS) return null;
+  }
+}
+
+// src/amazon/selectors.ts
+var TRANSACTIONS = {
+  url: "https://www.amazon.com/cpe/yourpayments/transactions",
+  /** The "Next page" button (a form submit). */
+  next: ['input[name*="NextPage"]', 'span.a-button input[name*="nextPage" i]', ".a-pagination .a-last a[href]"],
+  nextText: /^next( page)?\s*(→|›)?$/i,
+  last4: /(?:\*{2,}|•{2,}|·{2,}|ending in\s*)\s*(\d{4})/i,
+  amount: /([+\-−–]?)\s*\$\s*([\d,]+\.\d{2})/,
+  refund: /refund|\+\s*\$/i
+};
 
 // src/storage.ts
 var KEYS = [
@@ -371,67 +418,104 @@ async function runSync(deps, opts = {}) {
     orders.push(o);
   };
   const allFound = () => !!remaining && !remaining.length;
-  const ids = [];
-  const seen = /* @__PURE__ */ new Set();
-  let pages = 0;
-  let blind = 0;
-  const thisYear = Number(deps.today().slice(0, 4));
-  years: for (let year = thisYear; year >= Number(listFrom.slice(0, 4)); year--) {
-    let url = deps.listUrl(year);
-    while (url) {
-      if (pages++ >= maxListPages) break years;
-      if (pages > 1) await deps.pause();
-      const page = await deps.loadList(url);
-      if ("blocked" in page) return stopFor(page.blocked);
-      if ("failed" in page) return finish("parse_failed", page.failed);
-      if ("skip" in page) break;
-      let fresh = 0;
-      const dated = page.ok.orders.filter((o) => o.orderDate);
-      for (const o of page.ok.orders) {
-        if (o.orderDate && o.orderDate < listFrom) continue;
-        if (seen.has(o.orderId)) continue;
-        seen.add(o.orderId);
-        fresh++;
+  let viaPayments = false;
+  if (todoCharges && deps.loadTransactions) {
+    const tx = await deps.loadTransactions(shift(from, -5));
+    if ("blocked" in tx) return stopFor(tx.blocked);
+    if ("ok" in tx && tx.ok.length) {
+      viaPayments = true;
+      const chargesOf = /* @__PURE__ */ new Map();
+      for (const r of tx.ok) {
+        for (const id of r.orderIds) chargesOf.set(id, [...chargesOf.get(id) ?? [], { date: r.date, cents: r.cents, last4: r.last4 }]);
+      }
+      const pool = tx.ok.filter((r) => r.orderIds.length);
+      const needed = [];
+      for (const u of todoCharges) {
+        const i = pool.findIndex((r) => sameCharge({ date: r.date, cents: r.cents, last4: r.last4 }, u));
+        if (i < 0) continue;
+        counts.found++;
+        for (const id of pool[i].orderIds) if (!needed.includes(id)) needed.push(id);
+        pool.splice(i, 1);
+      }
+      for (const id of needed) {
         counts.listed++;
-        if (o.orderId.startsWith("D")) {
+        if (id.startsWith("D")) {
           counts.digital++;
           continue;
         }
-        if (o.orderDate) {
-          if (wanted(o.orderDate)) ids.push(o.orderId);
-          continue;
-        }
-        if (await deps.isFinished(o.orderId)) {
-          counts.finished++;
-          continue;
-        }
-        if (tried >= maxOrders || allFound()) break years;
-        const read = await readOrder(o.orderId);
+        if (tried >= maxOrders) break;
+        const read = await readOrder(id);
         if (typeof read === "string") return stopFor(read);
-        if (!read) {
-          if (++blind >= 3) break years;
-          continue;
-        }
-        blind = 0;
-        if (read.orderDate < listFrom) break years;
-        if (wanted(read.orderDate)) keep(read);
-        if (allFound()) break years;
+        if (!read) continue;
+        read.charges = chargesOf.get(id) ?? read.charges;
+        if (!read.charges.length) counts.noChargeList++;
+        orders.push(read);
       }
-      if (dated.length && dated.every((o) => o.orderDate < listFrom)) break years;
-      if (!fresh) break;
-      url = page.ok.nextUrl;
     }
   }
-  const todo = [];
-  for (const id of ids.reverse()) {
-    if (await deps.isFinished(id)) counts.finished++;
-    else todo.push(id);
-  }
-  for (const id of todo) {
-    if (allFound() || tried >= maxOrders) break;
-    const read = await readOrder(id);
-    if (typeof read === "string") return stopFor(read);
-    if (read) keep(read);
+  if (!viaPayments) {
+    const ids = [];
+    const seen = /* @__PURE__ */ new Set();
+    let pages = 0;
+    let blind = 0;
+    const thisYear = Number(deps.today().slice(0, 4));
+    years: for (let year = thisYear; year >= Number(listFrom.slice(0, 4)); year--) {
+      let url = deps.listUrl(year);
+      while (url) {
+        if (pages++ >= maxListPages) break years;
+        if (pages > 1) await deps.pause();
+        const page = await deps.loadList(url);
+        if ("blocked" in page) return stopFor(page.blocked);
+        if ("failed" in page) return finish("parse_failed", page.failed);
+        if ("skip" in page) break;
+        let fresh = 0;
+        const dated = page.ok.orders.filter((o) => o.orderDate);
+        for (const o of page.ok.orders) {
+          if (o.orderDate && o.orderDate < listFrom) continue;
+          if (seen.has(o.orderId)) continue;
+          seen.add(o.orderId);
+          fresh++;
+          counts.listed++;
+          if (o.orderId.startsWith("D")) {
+            counts.digital++;
+            continue;
+          }
+          if (o.orderDate) {
+            if (wanted(o.orderDate)) ids.push(o.orderId);
+            continue;
+          }
+          if (await deps.isFinished(o.orderId)) {
+            counts.finished++;
+            continue;
+          }
+          if (tried >= maxOrders || allFound()) break years;
+          const read = await readOrder(o.orderId);
+          if (typeof read === "string") return stopFor(read);
+          if (!read) {
+            if (++blind >= 3) break years;
+            continue;
+          }
+          blind = 0;
+          if (read.orderDate < listFrom) break years;
+          if (wanted(read.orderDate)) keep(read);
+          if (allFound()) break years;
+        }
+        if (dated.length && dated.every((o) => o.orderDate < listFrom)) break years;
+        if (!fresh) break;
+        url = page.ok.nextUrl;
+      }
+    }
+    const todo = [];
+    for (const id of ids.reverse()) {
+      if (await deps.isFinished(id)) counts.finished++;
+      else todo.push(id);
+    }
+    for (const id of todo) {
+      if (allFound() || tried >= maxOrders) break;
+      const read = await readOrder(id);
+      if (typeof read === "string") return stopFor(read);
+      if (read) keep(read);
+    }
   }
   counts.read = orders.length;
   if (counts.unreadable >= 3 && counts.unreadable * 2 >= tried || counts.unreadable > 0 && counts.read === 0) {
@@ -471,7 +555,7 @@ async function runSync(deps, opts = {}) {
 }
 
 // src/background.ts
-var VERSION = "0.4.3";
+var VERSION = "0.5.0";
 var AMAZON = "https://www.amazon.com";
 var ALARM = "sync";
 var EVERY_MINUTES = 6 * 60;
@@ -565,6 +649,33 @@ async function loadOrder(orderId) {
   const charges = await parse("charges", invoice.html, invoice.url);
   return "ok" in charges ? { ok: { ...got.ok, charges: charges.ok } } : got;
 }
+var MAX_TX_PAGES = 8;
+async function loadTransactions(since) {
+  const rows = /* @__PURE__ */ new Map();
+  const add = (list) => list.forEach((r) => rows.set(`${r.date}|${r.cents}|${r.orderIds.join(",")}`, r));
+  const enough = (page2) => !page2.hasNext || page2.rows.some((r) => r.date < since);
+  let page = await readAmazon(TRANSACTIONS.url, "transactions");
+  let got = await parse("transactions", page.html, page.url);
+  if ("blocked" in got) return got;
+  if (!useTab && (!("ok" in got) || !got.ok.rows.length || !enough(got.ok))) {
+    useTab = true;
+    page = await readInTab(TRANSACTIONS.url, "transactions");
+    got = await parse("transactions", page.html, page.url);
+    if ("blocked" in got) return got;
+  }
+  if (!("ok" in got)) return { failed: "orders_list" };
+  add(got.ok.rows);
+  for (let n = 1; n < MAX_TX_PAGES && !enough(got.ok); n++) {
+    await pause();
+    const next = await nextPageInTab("transactions");
+    if (!next) break;
+    const more = await parse("transactions", next.html, next.url);
+    if (!("ok" in more)) break;
+    got = more;
+    add(more.ok.rows);
+  }
+  return { ok: [...rows.values()] };
+}
 var listUrl = (year) => `${AMAZON}/your-orders/orders?timeFilter=year-${year}`;
 async function category(productId) {
   if (!/^[A-Z0-9]{10}$/.test(productId)) return { ok: null };
@@ -611,6 +722,7 @@ function syncNow() {
           listUrl,
           loadList,
           loadOrder,
+          loadTransactions,
           category,
           isFinished,
           markFinished: (ids) => markFinished(ids),
@@ -723,6 +835,15 @@ ${await outlineOf(invoice)}`);
         }
         if (first) parts.push(`== Order page${useTab ? " (tab)" : ""} ==
 ${first}`);
+        await pause();
+        let tx = await readAmazon(TRANSACTIONS.url, "transactions");
+        const txGot = await parse("transactions", tx.html, tx.url);
+        if (!useTab && (!("ok" in txGot) || !txGot.ok.rows.length)) {
+          useTab = true;
+          tx = await readInTab(TRANSACTIONS.url, "transactions");
+        }
+        parts.push(`== Transactions${useTab ? " (tab)" : ""} ==
+${await outlineOf(tx)}`);
         return { outline: parts.join("\n\n") };
       } finally {
         await closeTab();

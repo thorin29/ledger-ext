@@ -1,7 +1,7 @@
 // Fixtures are hand-written with invented names, orders, cards and prices.
 import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
-import { blocked, chargesIn, outline, ParseError, parseOrderDetails, parseOrderList, parseProductCategory } from "../src/amazon/parse";
+import { blocked, chargesIn, outline, ParseError, parseOrderDetails, parseOrderList, parseProductCategory, parseTransactions } from "../src/amazon/parse";
 
 const page = (name: string) => new JSDOM(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8")).window.document;
 const BASE = "https://www.amazon.com/your-orders/orders?timeFilter=year-2026";
@@ -81,6 +81,33 @@ describe("Amazon's locked pages", () => {
     } catch (e) {
       expect((e as ParseError).section).toBe("order_unavailable");
     }
+  });
+});
+
+describe("current order page layout", () => {
+  it("reads every item in a shipment, by shipment, with product ids and quantities", () => {
+    const o = parseOrderDetails(page("order-current-layout.html"), "111-0000000-0000007");
+    expect(o.orderDate).toBe("2026-11-15");
+    expect(o.items).toEqual([
+      { name: "Example Hockey Tape, 6 Pack", cents: 1200, quantity: 1, productId: "B000000011", shipmentKey: "1", shipDate: "2026-11-17" },
+      { name: "Example Sweet Potatoes, 3 lb", cents: 1000, quantity: 2, productId: "B000000012", shipmentKey: "1", shipDate: "2026-11-17" },
+      { name: "Example Dish Soap", cents: 450, quantity: 1, productId: "B000000013", shipmentKey: "2", shipDate: "2026-12-02" },
+    ]);
+    // The charges are behind "View related transactions" now, not on the page.
+    expect(o.charges).toEqual([]);
+    expect(JSON.stringify(o)).not.toMatch(/Jordan|Invented/);
+  });
+});
+
+describe("Your Payments transactions", () => {
+  it("reads each charge's date, amount, card and orders, leaving out refunds and rows without an order", () => {
+    const r = parseTransactions(page("transactions.html"));
+    expect(r.rows).toEqual([
+      { date: "2026-11-19", cents: 2541, last4: "0000", orderIds: ["111-0000000-0000007"] },
+      { date: "2026-11-19", cents: 487, last4: "0000", orderIds: ["111-0000000-0000007"] },
+      { date: "2026-11-17", cents: 103450, last4: "9999", orderIds: ["111-0000000-0000005", "111-0000000-0000004"] },
+    ]);
+    expect(r.hasNext).toBe(true);
   });
 });
 

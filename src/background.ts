@@ -5,10 +5,11 @@
  */
 
 import * as api from "./ledger/api";
-import { checkStopped, closeTab, readInTab, resetTab, stopTab, TabClosedError, type PageKind } from "./amazon/tab";
+import { checkStopped, closeTab, nextPageInTab, readInTab, resetTab, stopTab, TabClosedError, type PageKind } from "./amazon/tab";
+import { TRANSACTIONS } from "./amazon/selectors";
 import { cachedCategory, clearFinished, forget, isFinished, load, markFinished, save, saveCategory } from "./storage";
 import { runSync, type Loaded } from "./sync";
-import type { ListPage, Section, SyncOrder, SyncStatus } from "./types";
+import type { ListPage, Section, SyncOrder, SyncStatus, TxRow } from "./types";
 
 declare const __VERSION__: string;
 export const VERSION = __VERSION__;
@@ -73,7 +74,7 @@ async function closeOffscreen(): Promise<void> {
 
 type Parsed<T> = Loaded<T> | { outline: string };
 
-async function parse<T>(kind: "list" | "order" | "charges" | "category" | "outline", html: string, url: string, orderId?: string): Promise<Parsed<T>> {
+async function parse<T>(kind: "list" | "order" | "charges" | "category" | "transactions" | "outline", html: string, url: string, orderId?: string): Promise<Parsed<T>> {
   await ensureOffscreen();
   return chrome.runtime.sendMessage({ target: "offscreen", kind, html, url, orderId });
 }
@@ -140,6 +141,41 @@ async function loadOrder(orderId: string): Promise<Loaded<SyncOrder>> {
   return "ok" in charges ? { ok: { ...got.ok, charges: charges.ok } } : got;
 }
 
+type TxPage = { rows: TxRow[]; hasNext: boolean };
+const MAX_TX_PAGES = 8;
+
+/**
+ * Your Payments › Transactions back to `since`: a plain request first, the tab if that shows no
+ * charges or more pages are needed (its Next button only works in a real page).
+ */
+async function loadTransactions(since: string): Promise<Loaded<TxRow[]>> {
+  const rows = new Map<string, TxRow>();
+  const add = (list: TxRow[]) => list.forEach((r) => rows.set(`${r.date}|${r.cents}|${r.orderIds.join(",")}`, r));
+  const enough = (page: TxPage) => !page.hasNext || page.rows.some((r) => r.date < since);
+
+  let page = await readAmazon(TRANSACTIONS.url, "transactions");
+  let got = (await parse<TxPage>("transactions", page.html, page.url)) as Loaded<TxPage>;
+  if ("blocked" in got) return got;
+  if (!useTab && (!("ok" in got) || !got.ok.rows.length || !enough(got.ok))) {
+    useTab = true;
+    page = await readInTab(TRANSACTIONS.url, "transactions");
+    got = (await parse<TxPage>("transactions", page.html, page.url)) as Loaded<TxPage>;
+    if ("blocked" in got) return got;
+  }
+  if (!("ok" in got)) return { failed: "orders_list" };
+  add(got.ok.rows);
+  for (let n = 1; n < MAX_TX_PAGES && !enough(got.ok); n++) {
+    await pause();
+    const next = await nextPageInTab("transactions");
+    if (!next) break;
+    const more = (await parse<TxPage>("transactions", next.html, next.url)) as Loaded<TxPage>;
+    if (!("ok" in more)) break;
+    got = more;
+    add(more.ok.rows);
+  }
+  return { ok: [...rows.values()] };
+}
+
 const listUrl = (year: number) => `${AMAZON}/your-orders/orders?timeFilter=year-${year}`;
 
 /** A product's category: from the cache, else its product page (one GET), then cached. */
@@ -193,6 +229,7 @@ export function syncNow(): Promise<void> {
           listUrl,
           loadList,
           loadOrder,
+          loadTransactions,
           category,
           isFinished,
           markFinished: (ids) => markFinished(ids),
@@ -316,6 +353,14 @@ async function handle(msg: Request): Promise<unknown> {
           }
         }
         if (first) parts.push(`== Order page${useTab ? " (tab)" : ""} ==\n${first}`);
+        await pause();
+        let tx = await readAmazon(TRANSACTIONS.url, "transactions");
+        const txGot = (await parse<TxPage>("transactions", tx.html, tx.url)) as Loaded<TxPage>;
+        if (!useTab && (!("ok" in txGot) || !txGot.ok.rows.length)) {
+          useTab = true;
+          tx = await readInTab(TRANSACTIONS.url, "transactions");
+        }
+        parts.push(`== Transactions${useTab ? " (tab)" : ""} ==\n${await outlineOf(tx)}`);
         return { outline: parts.join("\n\n") };
       } finally {
         await closeTab();

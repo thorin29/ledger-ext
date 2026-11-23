@@ -22,9 +22,9 @@ To update, replace the `dist` folder with the new one and click the reload arrow
 
 - Every 6 hours while Chrome is open, and when Chrome starts, it reads **Your Orders** using
   the Amazon sign-in already in your browser. **Sync Now** runs it any time.
-- Ledger tells it which Amazon charges aren't split yet. It reads only orders placed in the 30
-  days before one of those, and stops once they've all turned up. With nothing to split, it
-  doesn't open Amazon.
+- Ledger tells it which Amazon charges aren't split yet. It finds those on Amazon's Your
+  Payments › Transactions page, which names the order each charge paid for, and opens only those
+  orders. With nothing to split, it doesn't open Amazon.
 - Pages are read with plain requests. If Amazon only shows order details inside a real page, the
   sync opens one muted tab behind your current one, reads the pages there, and closes it when
   done. Closing it yourself just stops that sync.

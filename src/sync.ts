@@ -9,7 +9,7 @@
  */
 
 import { LedgerError, type OrdersResult, type Status } from "./ledger/api";
-import type { Blocked, ListPage, LocalProblem, RunCounts, Section, SyncCharge, SyncOrder, SyncStatus, UnsplitCharge } from "./types";
+import type { Blocked, ListPage, LocalProblem, RunCounts, Section, SyncCharge, SyncOrder, SyncStatus, TxRow, UnsplitCharge } from "./types";
 
 export type Loaded<T> = { ok: T } | { blocked: Exclude<Blocked, null> } | { failed: Section } | { skip: "cancelled" | true };
 
@@ -17,6 +17,8 @@ export interface SyncDeps {
   listUrl(year: number): string;
   loadList(url: string): Promise<Loaded<ListPage>>;
   loadOrder(orderId: string): Promise<Loaded<SyncOrder>>;
+  /** Amazon's Your Payments › Transactions back to `since`: each charge with its order numbers. */
+  loadTransactions?(since: string): Promise<Loaded<TxRow[]>>;
   /** A product's category (cached, or read from its page). Null when the page has none. */
   category(productId: string): Promise<{ ok: string | null } | { blocked: Exclude<Blocked, null> }>;
   /** Orders finished on an earlier sync (every charge found). */
@@ -158,76 +160,117 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions = {}): Promise<S
   };
   const allFound = () => !!remaining && !remaining.length;
 
-  // 1. Your Orders, newest first, back to listFrom. An order whose date the list doesn't show
-  // is opened right away to learn it, and the walk stops at the first one older than needed.
-  const ids: string[] = [];
-  const seen = new Set<string>();
-  let pages = 0;
-  /** Undated orders that couldn't be opened in a row: without dates the walk can't know where to stop. */
-  let blind = 0;
-  const thisYear = Number(deps.today().slice(0, 4));
-  years: for (let year = thisYear; year >= Number(listFrom.slice(0, 4)); year--) {
-    let url: string | null = deps.listUrl(year);
-    while (url) {
-      if (pages++ >= maxListPages) break years;
-      if (pages > 1) await deps.pause();
-      const page = await deps.loadList(url);
-      if ("blocked" in page) return stopFor(page.blocked);
-      if ("failed" in page) return finish("parse_failed", page.failed);
-      if ("skip" in page) break;
-      let fresh = 0;
-      const dated = page.ok.orders.filter((o) => o.orderDate);
-      for (const o of page.ok.orders) {
-        if (o.orderDate && o.orderDate < listFrom) continue;
-        if (seen.has(o.orderId)) continue;
-        seen.add(o.orderId);
-        fresh++;
+  // 1. The direct way: find each missing charge on Amazon's Transactions page, which names the
+  // order it paid for, and open only those orders. Their charges come from that page too.
+  let viaPayments = false;
+  if (todoCharges && deps.loadTransactions) {
+    const tx = await deps.loadTransactions(shift(from, -5));
+    if ("blocked" in tx) return stopFor(tx.blocked);
+    if ("ok" in tx && tx.ok.length) {
+      viaPayments = true;
+      const chargesOf = new Map<string, SyncCharge[]>();
+      for (const r of tx.ok) {
+        for (const id of r.orderIds) chargesOf.set(id, [...(chargesOf.get(id) ?? []), { date: r.date, cents: r.cents, last4: r.last4 }]);
+      }
+      const pool = tx.ok.filter((r) => r.orderIds.length);
+      const needed: string[] = [];
+      for (const u of todoCharges) {
+        const i = pool.findIndex((r) => sameCharge({ date: r.date, cents: r.cents, last4: r.last4 }, u));
+        if (i < 0) continue;
+        counts.found++;
+        for (const id of pool[i]!.orderIds) if (!needed.includes(id)) needed.push(id);
+        pool.splice(i, 1);
+      }
+      for (const id of needed) {
         counts.listed++;
-        // Digital orders (D01-…) have no shipped items and are charged differently.
-        if (o.orderId.startsWith("D")) {
+        if (id.startsWith("D")) {
           counts.digital++;
           continue;
         }
-        if (o.orderDate) {
-          if (wanted(o.orderDate)) ids.push(o.orderId);
-          continue;
-        }
-        if (await deps.isFinished(o.orderId)) {
-          counts.finished++;
-          continue;
-        }
-        if (tried >= maxOrders || allFound()) break years;
-        const read = await readOrder(o.orderId);
+        if (tried >= maxOrders) break;
+        const read = await readOrder(id);
         if (typeof read === "string") return stopFor(read);
-        if (!read) {
-          if (++blind >= 3) break years;
-          continue;
-        }
-        blind = 0;
-        // Past the start: everything below it on the list is older still.
-        if (read.orderDate < listFrom) break years;
-        if (wanted(read.orderDate)) keep(read);
-        if (allFound()) break years;
+        if (!read) continue;
+        read.charges = chargesOf.get(id) ?? read.charges;
+        if (!read.charges.length) counts.noChargeList++;
+        orders.push(read);
       }
-      // Every dated order on the page is before the start: done. One odd date doesn't stop it.
-      if (dated.length && dated.every((o) => o.orderDate! < listFrom)) break years;
-      // The same page again (a pager Amazon ignored): this year is done.
-      if (!fresh) break;
-      url = page.ok.nextUrl;
     }
   }
 
-  // 2. The rest of the orders the list dated, oldest first, until every missing charge turns up.
-  const todo: string[] = [];
-  for (const id of ids.reverse()) {
-    if (await deps.isFinished(id)) counts.finished++;
-    else todo.push(id);
-  }
-  for (const id of todo) {
-    if (allFound() || tried >= maxOrders) break;
-    const read = await readOrder(id);
-    if (typeof read === "string") return stopFor(read);
-    if (read) keep(read);
+  // 2. Otherwise, walk Your Orders.
+  if (!viaPayments) {
+    // Your Orders, newest first, back to listFrom. An order whose date the list doesn't show
+    // is opened right away to learn it, and the walk stops at the first one older than needed.
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    let pages = 0;
+    /** Undated orders that couldn't be opened in a row: without dates the walk can't know where to stop. */
+    let blind = 0;
+    const thisYear = Number(deps.today().slice(0, 4));
+    years: for (let year = thisYear; year >= Number(listFrom.slice(0, 4)); year--) {
+      let url: string | null = deps.listUrl(year);
+      while (url) {
+        if (pages++ >= maxListPages) break years;
+        if (pages > 1) await deps.pause();
+        const page = await deps.loadList(url);
+        if ("blocked" in page) return stopFor(page.blocked);
+        if ("failed" in page) return finish("parse_failed", page.failed);
+        if ("skip" in page) break;
+        let fresh = 0;
+        const dated = page.ok.orders.filter((o) => o.orderDate);
+        for (const o of page.ok.orders) {
+          if (o.orderDate && o.orderDate < listFrom) continue;
+          if (seen.has(o.orderId)) continue;
+          seen.add(o.orderId);
+          fresh++;
+          counts.listed++;
+          // Digital orders (D01-…) have no shipped items and are charged differently.
+          if (o.orderId.startsWith("D")) {
+            counts.digital++;
+            continue;
+          }
+          if (o.orderDate) {
+            if (wanted(o.orderDate)) ids.push(o.orderId);
+            continue;
+          }
+          if (await deps.isFinished(o.orderId)) {
+            counts.finished++;
+            continue;
+          }
+          if (tried >= maxOrders || allFound()) break years;
+          const read = await readOrder(o.orderId);
+          if (typeof read === "string") return stopFor(read);
+          if (!read) {
+            if (++blind >= 3) break years;
+            continue;
+          }
+          blind = 0;
+          // Past the start: everything below it on the list is older still.
+          if (read.orderDate < listFrom) break years;
+          if (wanted(read.orderDate)) keep(read);
+          if (allFound()) break years;
+        }
+        // Every dated order on the page is before the start: done. One odd date doesn't stop it.
+        if (dated.length && dated.every((o) => o.orderDate! < listFrom)) break years;
+        // The same page again (a pager Amazon ignored): this year is done.
+        if (!fresh) break;
+        url = page.ok.nextUrl;
+      }
+    }
+
+      // The rest of the orders the list dated, oldest first, until every missing charge turns up.
+    const todo: string[] = [];
+    for (const id of ids.reverse()) {
+      if (await deps.isFinished(id)) counts.finished++;
+      else todo.push(id);
+    }
+    for (const id of todo) {
+      if (allFound() || tried >= maxOrders) break;
+      const read = await readOrder(id);
+      if (typeof read === "string") return stopFor(read);
+      if (read) keep(read);
+    }
   }
   counts.read = orders.length;
   // A page here and there can be odd; most failing, or none readable, means Amazon changed.

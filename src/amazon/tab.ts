@@ -5,7 +5,7 @@
  * ever leave it, and only to Ledger.
  */
 
-export type PageKind = "list" | "order" | "invoice";
+export type PageKind = "list" | "order" | "invoice" | "transactions";
 
 export class TabClosedError extends Error {
   constructor() {
@@ -57,6 +57,8 @@ function probe(kind: PageKind): { ready: boolean; html: string; url: string } {
     const locked = [...d.querySelectorAll(".csd-encrypted-sensitive")].filter((el) => !el.children.length && !(el.textContent ?? "").trim());
     const cards = d.querySelectorAll(".order-card, .js-order-card").length;
     ready = ready && ((cards > 0 && locked.length === 0) || /0 orders placed|haven't placed|have not placed/i.test(text));
+  } else if (kind === "transactions") {
+    ready = ready && (/Order #|no transactions|you have no/i.test(text) || has("form[name*='signIn']"));
   } else if (kind === "order") {
     ready = ready && (has('[data-component="purchasedItems"], .yohtmlc-item, [data-component="orderDate"], [data-component="errorbanner"]') || /ordered on|order placed/i.test(text));
   }
@@ -146,4 +148,47 @@ export async function closeTab(): Promise<void> {
   const id = tabId;
   tabId = null;
   await chrome.tabs.remove(id).catch(() => undefined);
+}
+
+/** Runs inside the page: clicks the "Next page" button if there is one. */
+function clickNext(): boolean {
+  const byName = document.querySelector<HTMLElement>('input[name*="NextPage"], input[name*="nextPage"]');
+  const byText = [...document.querySelectorAll<HTMLElement>("a, button, span.a-button-text, input[type=submit]")].find((el) =>
+    /^next( page)?\s*(→|›)?$/i.test((el.textContent || (el as HTMLInputElement).value || "").trim()),
+  );
+  const target = byName ?? byText;
+  if (!target || target.closest(".a-button-disabled, .a-disabled, [aria-disabled='true']")) return false;
+  (target.closest("span.a-button")?.querySelector<HTMLElement>("input, a, button") ?? target).click();
+  return true;
+}
+
+function fingerprint(): string {
+  return (document.body?.innerText ?? "").slice(0, 3000);
+}
+
+/**
+ * Clicks "Next page" in the sync tab and waits until the page shows something new. Returns the
+ * new page, or null when there's no next page.
+ */
+export async function nextPageInTab(kind: PageKind): Promise<{ html: string; url: string } | null> {
+  checkStopped();
+  if (tabId === null) return null;
+  const id = tabId;
+  const [before] = await chrome.scripting.executeScript({ target: { tabId: id }, func: fingerprint });
+  const [clicked] = await chrome.scripting.executeScript({ target: { tabId: id }, func: clickNext });
+  if (!clicked?.result) return null;
+  const started = Date.now();
+  for (;;) {
+    await new Promise((r) => setTimeout(r, POLL_MS));
+    if (!(await tabExists(id))) throw new TabClosedError();
+    try {
+      const [now] = await chrome.scripting.executeScript({ target: { tabId: id }, func: fingerprint });
+      const [frame] = await chrome.scripting.executeScript({ target: { tabId: id }, func: probe, args: [kind] });
+      const result = frame?.result as { ready: boolean; html: string; url: string } | undefined;
+      if (result && now?.result !== before?.result && result.ready) return { html: result.html, url: result.url };
+    } catch {
+      // Mid-navigation: keep waiting.
+    }
+    if (Date.now() - started > READY_TIMEOUT_MS) return null;
+  }
 }
